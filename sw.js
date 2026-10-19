@@ -1,6 +1,6 @@
 // Guarda la app en el celular para que abra sin señal y manda avisos en segundo plano.
 // Al cambiar cualquier archivo, subí este número para que los dispositivos bajen la versión nueva.
-const CACHE = 'flota-v3';
+const CACHE = 'flota-v4';
 const ASSETS = [
   './',
   'index.html',
