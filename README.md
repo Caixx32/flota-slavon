@@ -7,6 +7,7 @@ App web para la flota de vehículos de **Slavon High Sport Performance**: usos, 
 - Pensada para el celular e instalable como app (PWA): en Android, menú ⋮ → «Instalar app»; en iPhone, Safari → Compartir → «Agregar a inicio».
 - Funciona sin señal: todo lo que se carga queda guardado en el celular y se sube solo cuando vuelve la conexión (Firestore con caché offline).
 - Login con Google. Sólo entran los mails dados de alta por un admin.
+- Modo claro y oscuro: sigue al celular (automático) o se elige en *Más → Apariencia* (el chofer, tocando su nombre arriba a la derecha). Se guarda en cada celular.
 - HTML, CSS y JavaScript sin framework ni compilación. Firebase (Auth + Firestore) por CDN. Las fotos se guardan comprimidas dentro de Firestore (no se usa Firebase Storage).
 
 ## Roles

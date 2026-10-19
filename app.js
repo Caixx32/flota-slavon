@@ -60,6 +60,13 @@ function updateChrome() {
   }
 }
 
+// Apariencia de este celular: automático (sigue al sistema), claro u oscuro.
+function setTheme(theme) {
+  device.theme = theme === 'auto' ? undefined : theme;
+  saveDevice();
+  applyTheme(theme);
+}
+
 function goTo(tab) {
   ui.tab = tab;
   if (tab !== 'vehicles') ui.vehicleId = null;
@@ -93,7 +100,14 @@ FlotaCloud.setWriteErrorHandler((e) => {
 /* ---------- Eventos ---------- */
 
 const actions = {
-  'pick-vehicle': (el) => { ui.driverVehicle = el.dataset.id; render(); },
+  'pick-vehicle': (el) => {
+    ui.driverVehicle = el.dataset.id;
+    render();
+    // Lleva los botones a la vista para no tener que buscarlos.
+    document.getElementById('driver-actions')?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  },
+  'go-vehicles': () => goTo('vehicles'),
+  'go-reports': () => goTo('reports'),
   'start-uso': (el) => startUsoForm(el.dataset.id || ui.driverVehicle),
   'end-uso': (el) => el.dataset.id && endUsoForm(el.dataset.id),
   'end-uso-pick': () => openEndUsoPicker(),
@@ -162,6 +176,7 @@ view.addEventListener('click', (ev) => {
     else if (el.dataset.seg === 'usostatus') ui.usosFilter.status = v;
     else if (el.dataset.seg === 'repmode') rep.mode = v;
     else if (el.dataset.seg === 'currency') { ui.currency = v; device.currency = v; saveDevice(); }
+    else if (el.dataset.seg === 'theme') setTheme(v);
     render();
   } else if (el.dataset.selectMonth) {
     if (ui.tab === 'reports') { rep.mode = 'mes'; rep.month = el.dataset.selectMonth; } else ui.expMonth = el.dataset.selectMonth;
@@ -208,8 +223,16 @@ meBtn.addEventListener('click', () => {
     <h2>${esc(state.me.name || state.me.email)}</h2>
     <p class="sub">${esc(state.me.email)} · ${esc(ROLES[state.me.role])}</p>
     <p class="sub">Todo lo que cargás se guarda en el celular y se sube solo cuando hay señal. Una vez guardado no se puede modificar: si te equivocaste, avisale al encargado.</p>
+    <div class="section-title">Apariencia</div>
+    ${segmented('theme', THEMES, device.theme || 'auto')}
     <div class="actions"><button class="btn danger" data-act="out">${icon('logout')}Cerrar sesión</button><span class="spacer"></span><button class="btn ghost" data-sheet-close>Cerrar</button></div>`, {
     onClick: async (ev) => {
+      const seg = ev.target.closest('[data-seg="theme"]');
+      if (seg) {
+        setTheme(seg.dataset.value);
+        sheetBody.querySelectorAll('[data-seg="theme"]').forEach((b) => b.classList.toggle('on', b === seg));
+        return;
+      }
       if (ev.target.closest('[data-act="out"]') && confirm('¿Cerrar sesión en este celular?')) await FlotaCloud.signOut();
     },
   });

@@ -188,6 +188,14 @@ function loadDevice() {
 
 const device = loadDevice();
 
+// Apariencia: 'auto' (sigue al celular), 'light' o 'dark'. Se guarda sólo en este dispositivo.
+const THEMES = { auto: 'Automático', light: 'Claro', dark: 'Oscuro' };
+
+function applyTheme(theme = device.theme || 'auto') {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+}
+
 function saveDevice() {
   try {
     localStorage.setItem(DEVICE_KEY, JSON.stringify(device));

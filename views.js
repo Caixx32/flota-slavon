@@ -41,53 +41,82 @@ function amountLine(e) {
 /* ===================== CHOFER ===================== */
 
 function renderDriver() {
-  const mine = state.usos.filter((u) => u.driverEmail === state.me.email && !u.anulado);
+  const mine = state.usos.filter((u) => u.driverEmail === state.me.email && !u.anulado).sort((a, b) => b.startAt - a.startAt);
   const myLock = lockOf(state.me.email);
-  const lockedElsewhere = (v) => myLock && myLock.vehicleId !== v.id;
   const vehicles = activeVehicles();
-  if (!ui.driverVehicle || !byId(vehicles, ui.driverVehicle)) ui.driverVehicle = mine[0]?.vehicleId || (vehicles.length === 1 ? vehicles[0].id : null);
-  const sel = byId(vehicles, ui.driverVehicle);
-  const myUsoHere = sel && mine.find((u) => u.vehicleId === sel.id);
   const first = (state.me.name || '').split(' ')[0];
+  const hello = `
+    <div class="driver-hello">
+      <div class="eyebrow">${esc(new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' }))}</div>
+      <h1>Hola${first ? `, ${esc(first)}` : ''}</h1>
+    </div>`;
 
+  // 1) Tiene un uso en curso: eso es lo único importante. Terminar uso bien grande y, abajo, cargar nafta.
+  if (mine.length) {
+    const u = mine[0];
+    const unclosed = u.status === 'sin_cerrar';
+    view.innerHTML = `
+      ${hello}
+      <div class="current-uso ${unclosed ? 'unclosed' : ''}">
+        <div class="label">Estás usando</div>
+        <div class="veh">${esc(u.vehicleName || vehicleName(u.vehicleId))}</div>
+        <div class="since">Desde las ${esc(fmtTime(u.startAt))} · subiste con ${esc(fmtKm(u.kmStart))}</div>
+        <div class="since">${esc(u.obraName || '')}</div>
+        ${unclosed ? '<div class="note">Otra persona tomó el vehículo. Cerralo igual con los km que marcaba cuando lo dejaste.</div>' : ''}
+        <button class="go" data-action="end-uso" data-id="${u.id}">${icon('stop')}Terminar uso</button>
+      </div>
+      <div class="big-actions">
+        <button class="big-btn fuel" data-action="fuel" data-id="${u.vehicleId}">
+          ${icon('fuel')}<span>Cargar nafta<small>Litros, monto y foto del ticket</small></span>
+        </button>
+      </div>
+      <p class="sub" style="text-align:center;margin-top:16px">Para usar otro vehículo, primero terminá este uso.</p>`;
+    return;
+  }
+
+  // 2) Hay un candado pero el uso no aparece (por ejemplo, sin señal todavía): avisar en lugar de dejar la pantalla vacía.
+  if (myLock) {
+    view.innerHTML = `
+      ${hello}
+      <div class="card flag-warn">
+        <div class="name">Tenés un uso abierto en ${esc(vehicleName(myLock.vehicleId))}</div>
+        <p class="sub">Todavía no se terminó de sincronizar. Esperá a tener señal; si no aparece, avisale al encargado.</p>
+      </div>`;
+    return;
+  }
+
+  // 3) Sin uso abierto: elegir el vehículo con tarjetas grandes y después qué hacer.
+  if (!ui.driverVehicle || !byId(vehicles, ui.driverVehicle)) ui.driverVehicle = vehicles.length === 1 ? vehicles[0].id : null;
+  const sel = byId(vehicles, ui.driverVehicle);
   view.innerHTML = `
-    ${pageHead(`Hola${first ? `, ${first}` : ''}`, 'Elegí el vehículo y qué querés registrar.')}
-    ${mine.map((u) => `
-      <div class="card accent">
-        <div class="row">
-          <div class="icon-bubble">${icon('play')}</div>
-          <div class="grow"><div class="name">Tenés un uso en curso</div><div class="sub">${esc(u.vehicleName)} · desde ${esc(fmtDateTime(u.startAt))}</div>
-          ${u.status === 'sin_cerrar' ? '<div class="issue bad">Otra persona tomó el vehículo: cerralo igual con tus km.</div>' : ''}</div>
-        </div>
-        <div class="actions"><button class="btn primary block" data-action="end-uso" data-id="${u.id}">${icon('stop')}Terminar este uso</button></div>
-      </div>`).join('')}
-    <div class="section-title">Vehículo</div>
-    <div class="vehicle-pick">
-      ${vehicles.map((v) => `
-        <div class="card tap ${v.id === ui.driverVehicle ? 'selected' : ''} ${v.status === 'taller' ? 'disabled' : ''}" data-action="pick-vehicle" data-id="${v.id}" role="button" tabindex="0">
-          <div class="vehicle-card">
+    ${hello}
+    <div class="section-title">¿Qué vehículo vas a usar?</div>
+    <div class="pick-grid">
+      ${vehicles.map((v) => {
+        const taller = v.status === 'taller';
+        const who = taller ? 'En taller' : v.status === 'uso' && v.driverName ? `Lo tiene ${v.driverName}` : 'Disponible';
+        return `
+          <button class="pick ${v.id === ui.driverVehicle ? 'selected' : ''} ${taller ? 'disabled' : ''}" data-action="pick-vehicle" data-id="${v.id}">
             ${vphoto(v)}
-            <div class="grow">
-              <div class="name">${esc(v.name)}</div>
-              <div class="sub">${v.plate ? `<span class="plate">${esc(v.plate)}</span> · ` : ''}${esc(v.brand || VEHICLE_TYPES[v.type] || '')}</div>
-              <div style="margin-top:6px">${statusBadge(v)} ${v.status === 'uso' && v.driverName ? `<span class="sub small">${esc(v.driverEmail === state.me.email ? 'Lo tenés vos' : v.driverName)}</span>` : ''}</div>
+            <div class="body">
+              <div class="grow">
+                <div class="nm ellipsis">${esc(v.name)}</div>
+                <div class="who">${v.plate ? `<span class="plate">${esc(v.plate)}</span> · ` : ''}${esc(who)}</div>
+              </div>
+              <span class="tick">${icon('check')}</span>
             </div>
-          </div>
-        </div>`).join('') || '<div class="empty">Todavía no hay vehículos cargados. Avisale al administrador.</div>'}
+          </button>`;
+      }).join('') || '<div class="empty">Todavía no hay vehículos cargados. Avisale al administrador.</div>'}
     </div>
     ${sel ? `
-      <div class="section-title">${esc(sel.name)}</div>
-      <div class="big-actions">
-        <button class="big-btn start" data-action="start-uso" data-id="${sel.id}" ${sel.status === 'taller' || myUsoHere || lockedElsewhere(sel) ? 'disabled' : ''}>
-          ${icon('play')}<span>Iniciar uso<small>${sel.status === 'taller' ? 'Está en taller' : myUsoHere ? 'Ya lo estás usando' : lockedElsewhere(sel) ? `Primero terminá tu uso en ${esc(vehicleName(myLock.vehicleId))}` : 'Km, foto del tablero y destino'}</small></span>
-        </button>
-        <button class="big-btn end" data-action="end-uso" data-id="${myUsoHere?.id || ''}" ${myUsoHere ? '' : 'disabled'}>
-          ${icon('stop')}<span>Terminar uso<small>${myUsoHere ? `Empezaste ${fmtDateTime(myUsoHere.startAt)}` : 'No tenés un uso abierto en este vehículo'}</small></span>
+      <div class="big-actions" id="driver-actions" style="margin-top:18px">
+        <button class="big-btn start" data-action="start-uso" data-id="${sel.id}" ${sel.status === 'taller' ? 'disabled' : ''}>
+          ${icon('play')}<span>Iniciar uso<small>${sel.status === 'taller' ? 'Está en taller' : `${esc(sel.name)} · km, foto del tablero y destino`}</small></span>
         </button>
         <button class="big-btn fuel" data-action="fuel" data-id="${sel.id}">
           ${icon('fuel')}<span>Cargar nafta<small>Litros, monto y foto del ticket</small></span>
         </button>
-      </div>` : vehicles.length ? '<div class="empty">Tocá un vehículo para ver las opciones.</div>' : ''}
+      </div>` : vehicles.length ? '<p class="sub" style="text-align:center;margin-top:16px">Tocá el vehículo para seguir.</p>' : ''}
   `;
 }
 
@@ -113,36 +142,56 @@ function renderHome() {
   const missing = missingData();
   const monthKm = monthUsos.reduce((s, u) => s + (usoKm(u) || 0), 0);
   const inUse = vehicles.filter((v) => v.status === 'uso').length;
+  const taller = vehicles.filter((v) => v.status === 'taller').length;
   const bad = list.filter((a) => a.st.level === 'bad').length;
   const showNotif = notificationsSupported() && Notification.permission === 'default';
+  const summary = [`${inUse} en uso`, `${vehicles.length - inUse - taller} disponible${vehicles.length - inUse - taller === 1 ? '' : 's'}`, taller ? `${taller} en taller` : ''].filter(Boolean).join(' · ');
 
   view.innerHTML = `
-    ${pageHead('Flota', `${vehicles.length} vehículos · ${inUse} en uso ahora`, new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' }))}
-    <div class="tiles">
-      <div class="tile"><div class="label">En uso</div><div class="value">${inUse}<small> / ${vehicles.length}</small></div></div>
-      <div class="tile ${bad ? 'bad' : list.length ? 'warn' : ''}"><div class="label">Avisos</div><div class="value">${list.length}</div></div>
-      <div class="tile"><div class="label">Km del mes</div><div class="value">${Math.round(monthKm).toLocaleString('es-AR')}</div></div>
-      <div class="tile"><div class="label">Gasto del mes</div><div class="value">${esc(shortMoney(monthExp, 'ARS'))}</div></div>
+    ${pageHead('Flota', esc(summary), new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' }))}
+
+    <div class="quick">
+      <button class="q-start" data-action="start-uso">${icon('play')}Iniciar uso</button>
+      <button class="q-end" data-action="end-uso-pick">${icon('stop')}Terminar uso</button>
+      <button class="q-fuel" data-action="fuel">${icon('fuel')}Cargar nafta</button>
     </div>
 
-    <div class="section-title">Registrar</div>
-    <div class="big-actions" style="grid-template-columns:repeat(3,1fr);margin-top:0">
-      <button class="btn dark" style="flex-direction:column;padding:14px 4px" data-action="start-uso">${icon('play')}Iniciar uso</button>
-      <button class="btn dark" style="flex-direction:column;padding:14px 4px" data-action="end-uso-pick">${icon('stop')}Terminar uso</button>
-      <button class="btn dark" style="flex-direction:column;padding:14px 4px" data-action="fuel">${icon('fuel')}Cargar nafta</button>
-    </div>
-
-    ${showNotif ? `<div class="card row" style="margin-top:14px"><div class="icon-bubble">${icon('bell')}</div><div class="grow"><div class="name">Activá las notificaciones</div><div class="sub">Para enterarte de vencimientos, usos sin cerrar y km raros.</div></div><button class="btn small primary" data-action="enable-notif">Activar</button></div>` : ''}
+    <div class="section-title"><span>La flota ahora</span><button class="link" data-action="go-vehicles">Ver todo</button></div>
+    <div class="fleet">${vehicles.map(fleetCard).join('') || '<div class="empty">No hay vehículos.</div>'}</div>
 
     ${isAdmin() ? firstStepsCard() : ''}
 
-    <div class="section-title" id="attention"><span>Avisos</span>${list.length ? `<span>${list.length}</span>` : ''}</div>
-    <div class="card">${list.length ? list.slice(0, 8).map(alertRow).join('') + (list.length > 8 ? `<div class="list-item"><button class="btn small ghost" data-action="all-alerts">Ver los ${list.length} avisos</button></div>` : '') : ''}${missingRow(missing, !list.length)}</div>
+    <div class="section-title" id="attention"><span>Avisos${list.length ? ` · ${list.length}` : ''}</span>${list.length > 5 ? '<button class="link" data-action="all-alerts">Ver todos</button>' : ''}</div>
+    <div class="card ${bad ? 'flag-bad' : list.length ? 'flag-warn' : ''}">${list.slice(0, 5).map(alertRow).join('')}${missingRow(missing, !list.length)}</div>
     ${alertsNote()}
 
-    <div class="section-title">Vehículos</div>
-    ${vehicles.map(vehicleCard).join('')}
+    ${showNotif ? `<div class="card row" style="margin-top:14px"><div class="icon-bubble">${icon('bell')}</div><div class="grow"><div class="name">Activá las notificaciones</div><div class="sub">Para enterarte de vencimientos, usos sin cerrar y km raros.</div></div><button class="btn small primary" data-action="enable-notif">Activar</button></div>` : ''}
+
+    <div class="section-title"><span>Este mes</span><button class="link" data-action="go-reports">Reportes</button></div>
+    <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
+      <div class="tile"><div class="label">Usos</div><div class="value">${monthUsos.length}</div></div>
+      <div class="tile"><div class="label">Km</div><div class="value">${Math.round(monthKm).toLocaleString('es-AR')}</div></div>
+      <div class="tile"><div class="label">Gasto</div><div class="value">${esc(shortMoney(monthExp, 'ARS'))}</div></div>
+    </div>
   `;
+}
+
+// Tarjeta grande de cada vehículo en el Inicio: foto, estado, quién lo tiene y avisos.
+function fleetCard(v) {
+  const vAlerts = alerts().filter((a) => a.item.vehicleId === v.id);
+  const worst = vAlerts.some((a) => a.st.level === 'bad') ? 'bad' : vAlerts.length ? 'warn' : '';
+  const line = v.status === 'uso'
+    ? `${icon('user', 'tiny')} ${esc(v.driverName || '')} · desde ${esc(fmtTime(v.usoStartAt))}`
+    : v.status === 'taller' ? 'En el taller' : `${esc(fmtKm(v.km))}`;
+  return `
+    <div class="card tap fleet-card st-${v.status || 'disponible'}" data-action="open-vehicle" data-id="${v.id}" role="button" tabindex="0">
+      ${vphoto(v)}
+      <span class="status-band">${statusBadge(v)}</span>
+      <div class="body">
+        <div class="row" style="gap:8px"><div class="name grow ellipsis" style="font-size:1.05rem">${esc(v.name)}</div>${v.plate ? `<span class="plate">${esc(v.plate)}</span>` : ''}</div>
+        <div class="meta sub">${line}${vAlerts.length ? ` · <b style="color:var(--${worst})">${vAlerts.length} aviso${vAlerts.length > 1 ? 's' : ''}</b>` : ''}</div>
+      </div>
+    </div>`;
 }
 
 // Mientras falten datos de service o papeles, no se puede decir «todo en orden».
@@ -390,7 +439,7 @@ function renderVehicles() {
   const inactive = state.vehicles.filter((v) => v.active === false);
   view.innerHTML = `
     ${pageHead('Vehículos', 'Service, papeles, gastos y multas de cada uno.')}
-    ${activeVehicles().map(vehicleCard).join('') || '<div class="empty">No hay vehículos.</div>'}
+    <div class="fleet">${activeVehicles().map(fleetCard).join('') || '<div class="empty">No hay vehículos.</div>'}</div>
     <div class="actions"><button class="btn primary" data-action="add-vehicle">${icon('plus')}Agregar vehículo</button>
     ${inactive.length ? `<button class="btn ghost" data-action="toggle-inactive">${ui.showInactive ? 'Ocultar' : 'Ver'} dados de baja (${inactive.length})</button>` : ''}</div>
     ${ui.showInactive ? `<div class="section-title">Dados de baja</div>${inactive.map(vehicleCard).join('')}` : ''}`;
@@ -592,6 +641,10 @@ function renderMore() {
       <div class="set-row" data-action="enable-notif">${icon('bell')}<span class="grow">Notificaciones<br><span class="sub small">Usos sin cerrar y km raros llegan al abrir la app. En iPhone no hay avisos con la app cerrada.</span></span><span class="val">${notifState}</span>${icon('chev', 'chev')}</div>
       <div class="set-row" data-action="calendar">${icon('calendar')}<span class="grow">Vencimientos en el calendario</span><span class="val">${deadlines().length}</span>${icon('chev', 'chev')}</div>
       <div class="set-row" data-action="refresh-rate">${icon('dollar')}<span class="grow">Dólar blue</span><span class="val">${rate ? `${money.format(rate.value)} · ${esc(fmtDate(rate.date))}` : 'Sin dato'}</span></div>
+    </div>
+    <div class="settings">
+      <div class="set-row static">${icon('palette')}<span class="grow">Apariencia</span><span class="val">${esc(THEMES[device.theme || 'auto'])}</span>
+        ${segmented('theme', THEMES, device.theme || 'auto')}</div>
     </div>
     <div class="settings">
       <div class="set-row" data-action="sign-out">${icon('logout')}<span class="grow">Cerrar sesión</span><span class="val">${esc(state.me.email)}</span></div>
