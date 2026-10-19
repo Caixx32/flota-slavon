@@ -447,6 +447,15 @@ input, select, textarea {
   width: 100%; font: 400 1.05rem var(--font); color: var(--text);
   background: var(--field); border: 1px solid var(--field-line); border-radius: 12px; padding: 12px; min-height: 48px;
 }
+/* iPhone (Safari): los campos de fecha y hora tienen un ancho mínimo propio y el texto centrado,
+   y se salían de la pantalla. Se los obliga a respetar el ancho y alinear a la izquierda. */
+input[type="date"], input[type="time"], input[type="datetime-local"] {
+  -webkit-appearance: none; appearance: none;
+  display: block; min-width: 0; max-width: 100%; text-align: left;
+}
+input::-webkit-date-and-time-value { text-align: left; margin: 0; }
+input::-webkit-datetime-edit { padding: 0; }
+.field, .field-row > * { min-width: 0; }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--red); outline-offset: -1px; border-color: transparent; }
 input:disabled, select:disabled { background: var(--card-2); color: var(--muted); }
 textarea { resize: vertical; }
