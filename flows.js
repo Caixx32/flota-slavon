@@ -81,6 +81,13 @@ function startUsoForm(vehicleId) {
       if (veh.openUsoId && veh.driverEmail === driverEmail) {
         throw new FormError(`${driverEmail === state.me.email ? 'Ya tenés' : 'Esa persona ya tiene'} un uso abierto en este vehículo. Primero terminalo.`);
       }
+      // Un solo uso abierto por chofer (las reglas también lo exigen con el candado locks/{mail}).
+      const lock = lockOf(driverEmail);
+      if (lock) {
+        const other = byId(state.usos, lock.usoId);
+        const where = other?.vehicleName || vehicleName(lock.vehicleId);
+        throw new FormError(`${driverEmail === state.me.email ? 'Tenés' : 'Esa persona tiene'} un uso abierto en ${where}. Primero hay que terminarlo para iniciar otro.`);
+      }
       const prev = veh.openUsoId || null;
       if (prev && !confirm(`Este vehículo figura en uso por ${veh.driverName || 'otro chofer'} y ese uso no se cerró.\n\nSe va a iniciar tu uso igual y el anterior queda marcado «sin cerrar» para que lo revise un encargado. ¿Seguimos?`)) return false;
       const startAt = staff ? (fromLocalInput(val.startAt) || Date.now()) : Date.now();
@@ -106,6 +113,7 @@ function startUsoForm(vehicleId) {
         ...photo.ops,
         { op: 'set', col: 'usos', id, data: uso },
         { op: 'update', col: 'vehicles', id: veh.id, data: { status: 'uso', openUsoId: id, driverEmail, driverName, usoStartAt: startAt } },
+        { op: 'set', col: 'locks', id: driverEmail, data: { usoId: id, vehicleId: veh.id, at: startAt } },
       ];
       if (prev) ops.push({ op: 'update', col: 'usos', id: prev, data: { status: 'sin_cerrar', flaggedBy: stamp(), flaggedAt: FlotaCloud.serverTime() } });
       FlotaCloud.write(ops);
@@ -155,6 +163,7 @@ function endUsoForm(usoId) {
       };
       if (u.status === 'sin_cerrar') data.wasUnclosed = true;
       const ops = [...photo.ops, { op: 'update', col: 'usos', id: u.id, data }];
+      if (lockOf(u.driverEmail)?.usoId === u.id) ops.push({ op: 'delete', col: 'locks', id: u.driverEmail });
       const veh = byId(state.vehicles, u.vehicleId);
       if (veh && veh.openUsoId === u.id) {
         ops.push({ op: 'update', col: 'vehicles', id: veh.id, data: { status: 'disponible', openUsoId: null, driverEmail: null, driverName: null, usoStartAt: null, km: kmEnd, kmAt: Date.now() } });
@@ -219,12 +228,12 @@ function fuelForm(vehicleId) {
 
 function defaultTasksFor(vehicleId, type) {
   return (DEFAULT_TASKS[type] || DEFAULT_TASKS.utilitario).map(([name, everyKm, everyMonths]) => ({
-    id: uid(), vehicleId, name, everyKm, everyMonths, lastKm: null, lastDate: null, history: [],
+    id: uid(), vehicleId, name, everyKm, everyMonths, lastKm: null, lastDate: null, history: [], createdBy: stamp(), createdAt: Date.now(),
   }));
 }
 
 function defaultDocsFor(vehicleId) {
-  return DEFAULT_DOCS.map(([name, notifyDays]) => ({ id: uid(), vehicleId, name, number: '', expiry: '', notifyDays, note: '', files: [] }));
+  return DEFAULT_DOCS.map(([name, notifyDays]) => ({ id: uid(), vehicleId, name, number: '', expiry: '', notifyDays, note: '', files: [], createdBy: stamp(), createdAt: Date.now() }));
 }
 
 function newVehicleOps(v) {
@@ -254,17 +263,38 @@ function vehicleForm(id) {
     ],
     onSubmit: async (val) => {
       const km = numOrNull(val.km) ?? 0;
-      const photo = await commitFormPhoto('photo', 'vehicle');
-      const base = v ? { ...v } : { id: uid(), active: true, openUsoId: null, order: state.vehicles.length, createdBy: stamp(), createdAt: FlotaCloud.serverTime() };
-      const data = {
-        ...base,
+      const edited = {
         name: val.name.trim(), type: val.type, plate: val.plate.trim().toUpperCase(), year: numOrNull(val.year), brand: val.brand.trim(),
-        km, status: val.status, photo: photo.meta, notes: val.notes.trim(), updatedBy: stamp(), updatedAt: FlotaCloud.serverTime(),
+        km, status: val.status, notes: val.notes.trim(),
       };
-      if (v && v.status === 'uso' && val.status !== 'uso') Object.assign(data, { openUsoId: null, driverEmail: null, driverName: null, usoStartAt: null });
-      if (v && km !== v.km) data.kmAt = Date.now();
-      FlotaCloud.write([...photo.ops, ...(v ? [{ op: 'set', col: 'vehicles', id: data.id, data }] : newVehicleOps(data))]);
-      toast(v ? 'Vehículo actualizado.' : `${data.name} agregado, con sus tareas de service y papeles básicos.`);
+      if (!v) {
+        const photo = await commitFormPhoto('photo', 'vehicle');
+        if (edited.status === 'uso') edited.status = 'disponible';
+        const data = { id: uid(), active: true, openUsoId: null, order: state.vehicles.length, ...edited, photo: photo.meta, createdBy: stamp(), createdAt: FlotaCloud.serverTime() };
+        FlotaCloud.write([...photo.ops, ...newVehicleOps(data)]);
+        toast(`${data.name} agregado, con sus tareas de service y papeles básicos.`);
+        return;
+      }
+      // Sólo se guardan los campos que se cambiaron en el formulario (comparando con cómo estaban al abrirlo),
+      // así no se pisa un uso que un chofer haya iniciado mientras el formulario estaba abierto.
+      const changes = {};
+      const norm = (k, x) => x ?? (k === 'year' ? null : '');
+      for (const [k, value] of Object.entries(edited)) if (norm(k, v[k]) !== norm(k, value)) changes[k] = value;
+      const now = byId(state.vehicles, v.id) || v; // estado actual del vehículo (puede haber cambiado)
+      if ('status' in changes) {
+        if (now.openUsoId && changes.status !== 'uso') {
+          throw new FormError(`Este vehículo tiene un uso abierto de ${now.driverName || 'un chofer'} (desde ${fmtDateTime(now.usoStartAt)}). Para cambiar el estado, primero terminá o anulá ese uso desde «Usos».`);
+        }
+        if (!now.openUsoId && changes.status === 'uso') {
+          throw new FormError('«En uso» se pone solo al iniciar un uso. Elegí «Disponible» o «En taller».');
+        }
+      }
+      const photo = await commitFormPhoto('photo', 'vehicle');
+      if (formPhotos.photo?.added) changes.photo = photo.meta;
+      if ('km' in changes) changes.kmAt = Date.now();
+      if (!Object.keys(changes).length) return;
+      FlotaCloud.write([...photo.ops, { op: 'update', col: 'vehicles', id: v.id, data: { ...changes, updatedBy: stamp(), updatedAt: FlotaCloud.serverTime() } }]);
+      toast('Vehículo actualizado.');
     },
   });
 }
@@ -291,7 +321,7 @@ function taskForm(id, vehicleId) {
       { type: 'html', html: '</div>' },
     ],
     onSubmit: (val) => {
-      const data = { ...(t || { id: uid(), vehicleId, history: [], lastKm: null, lastDate: null }), name: val.name.trim(), everyKm: numOrNull(val.everyKm) || 0, everyMonths: numOrNull(val.everyMonths) || 0 };
+      const data = { ...(t || { id: uid(), vehicleId, history: [], lastKm: null, lastDate: null, createdBy: stamp(), createdAt: Date.now() }), name: val.name.trim(), everyKm: numOrNull(val.everyKm) || 0, everyMonths: numOrNull(val.everyMonths) || 0, updatedBy: stamp(), updatedAt: Date.now() };
       FlotaCloud.put('tasks', data.id, data);
     },
     onDelete: t ? () => FlotaCloud.del('tasks', t.id) : null,
@@ -322,7 +352,7 @@ function doneTaskForm(id) {
         entry.expenseId = uid();
         ops.push({ op: 'set', col: 'expenses', id: entry.expenseId, data: { id: entry.expenseId, vehicleId: t.vehicleId, vehicleName: v?.name || '', cat: 'service', date: val.date, amount: cost, note: `${t.name}${entry.shop ? ` · ${entry.shop}` : ''}`, km: entry.km, taskId: t.id, ...rate, files: [], createdBy: stamp(), createdAt: FlotaCloud.serverTime() } });
       }
-      const nt = { ...t, history: [...(t.history || []), entry] };
+      const nt = { ...t, history: [...(t.history || []), entry], updatedBy: stamp(), updatedAt: Date.now() };
       recomputeLast(nt);
       ops.push({ op: 'set', col: 'tasks', id: t.id, data: nt });
       if (v && entry.km != null && entry.km > (v.km || 0)) ops.push({ op: 'update', col: 'vehicles', id: v.id, data: { km: entry.km, kmAt: Date.now() } });
@@ -336,7 +366,7 @@ function removeTaskEntry(taskId, entryId) {
   const t = byId(state.tasks, taskId);
   const entry = t?.history.find((h) => h.id === entryId);
   if (!entry || !confirm('¿Borrar este registro del historial?')) return;
-  const nt = { ...t, history: t.history.filter((h) => h.id !== entryId) };
+  const nt = { ...t, history: t.history.filter((h) => h.id !== entryId), updatedBy: stamp(), updatedAt: Date.now() };
   recomputeLast(nt);
   const ops = [{ op: 'set', col: 'tasks', id: t.id, data: nt }];
   if (entry.expenseId && byId(state.expenses, entry.expenseId) && confirm('¿Borrar también el gasto de service asociado?')) ops.push({ op: 'delete', col: 'expenses', id: entry.expenseId });
@@ -361,7 +391,7 @@ function docForm(id, vehicleId) {
     ],
     onSubmit: async (val) => {
       const { ops, files } = await commitFormFiles('doc');
-      const data = { ...(d || { id: uid(), vehicleId }), name: val.name.trim(), number: val.number.trim(), expiry: val.expiry, notifyDays: numOrNull(val.notifyDays) ?? SOON_DAYS, note: val.note.trim(), files, updatedBy: stamp(), updatedAt: FlotaCloud.serverTime() };
+      const data = { ...(d || { id: uid(), vehicleId, createdBy: stamp(), createdAt: Date.now() }), name: val.name.trim(), number: val.number.trim(), expiry: val.expiry, notifyDays: numOrNull(val.notifyDays) ?? SOON_DAYS, note: val.note.trim(), files, updatedBy: stamp(), updatedAt: FlotaCloud.serverTime() };
       FlotaCloud.write([...ops, { op: 'set', col: 'docs', id: data.id, data }]);
     },
     onDelete: d ? () => FlotaCloud.write([...d.files.flatMap(removeAttachmentOps), { op: 'delete', col: 'docs', id: d.id }]) : null,
@@ -380,7 +410,10 @@ function expenseForm(id, vehicleId, presetCat = 'combustible') {
       { name: 'vehicleId', label: 'Vehículo', type: 'select', options: vehicleOptions(state.vehicles), value: vid, required: true },
       { name: 'cat', label: 'Categoría', type: 'select', options: Object.fromEntries(Object.entries(CATEGORIES).map(([k, c]) => [k, c.label])), value: e?.cat || presetCat, disabled: isCarga },
       { type: 'html', html: '<div class="field-row">' },
-      { name: 'date', label: 'Fecha', type: 'date', value: e?.date || today(), required: true },
+      // En las cargas de nafta se edita fecha y hora juntas («at»), y la fecha sale de ahí.
+      isCarga
+        ? { name: 'at', label: 'Fecha y hora', type: 'datetime', value: toLocalInput(e.at || parseISO(e.date).getTime()), required: true }
+        : { name: 'date', label: 'Fecha', type: 'date', value: e?.date || today(), required: true },
       { name: 'amount', label: 'Monto ($)', type: 'number', value: e?.amount ?? '', required: true },
       { type: 'html', html: '</div>' },
       { type: 'html', html: '<div class="field-row" data-fuel-row>' },
@@ -403,14 +436,18 @@ function expenseForm(id, vehicleId, presetCat = 'combustible') {
       if (!(amount > 0)) throw new FormError('Revisá el monto.');
       const { ops, files } = await commitFormFiles('expense');
       const cat = isCarga ? 'combustible' : val.cat;
-      const rate = !e || e.date !== val.date || !e.usdRate ? await rateFor(val.date) : { usdRate: e.usdRate, rateApprox: e.rateApprox };
+      const at = isCarga ? fromLocalInput(val.at) : null;
+      if (isCarga && !at) throw new FormError('Revisá la fecha y hora.');
+      const date = isCarga ? toISO(new Date(at)) : val.date;
+      const rate = !e || e.date !== date || !e.usdRate ? await rateFor(date) : { usdRate: e.usdRate, rateApprox: e.rateApprox };
       const data = {
         ...(e || { id: uid(), createdBy: stamp(), createdAt: FlotaCloud.serverTime() }),
-        vehicleId: val.vehicleId, vehicleName: vehicleName(val.vehicleId), cat, date: val.date, amount,
+        vehicleId: val.vehicleId, vehicleName: vehicleName(val.vehicleId), cat, date, amount,
         liters: cat === 'combustible' ? numOrNull(val.liters) : null, km: numOrNull(val.km), station: (val.station || '').trim(), note: (val.note || '').trim(),
         ...rate, updatedBy: stamp(), updatedAt: FlotaCloud.serverTime(),
       };
-      if (!isCarga) data.files = files;
+      if (isCarga) data.at = at;
+      else data.files = files;
       FlotaCloud.write([...ops, { op: 'set', col: 'expenses', id: data.id, data }]);
     },
     onDelete: e ? () => FlotaCloud.write([...(e.files || []).flatMap(removeAttachmentOps), ...removeAttachmentOps(e.photo), { op: 'delete', col: 'expenses', id: e.id }]) : null,
@@ -475,11 +512,12 @@ function fineForm(id, vehicleId) {
 /* ---------- Revisar y corregir usos ---------- */
 
 const USO_FIELDS = {
-  driverEmail: 'Chofer', vehicleId: 'Vehículo', startAt: 'Inicio', kmStart: 'Km subida', obraName: 'Obra', endAt: 'Fin', kmEnd: 'Km bajada', status: 'Estado', notes: 'Observaciones',
+  driverEmail: 'Chofer', vehicleId: 'Vehículo', startAt: 'Inicio', kmStart: 'Km subida', obraName: 'Obra', endAt: 'Fin', kmEnd: 'Km bajada', status: 'Estado', notes: 'Observaciones', anulado: 'Anulado',
 };
 
 function fmtUsoValue(k, v) {
   if (v == null || v === '') return '—';
+  if (typeof v === 'boolean') return v ? 'Sí' : 'No';
   if (k === 'startAt' || k === 'endAt') return fmtDateTime(v);
   if (k === 'kmStart' || k === 'kmEnd') return fmtKm(v);
   if (k === 'status') return USO_STATUS[v] || v;
@@ -544,6 +582,7 @@ function usoCorrectionForm(id) {
         corrections: [...(u.corrections || []), { by: stamp(), at: Date.now(), changes, reviewed: reviewNow, reason: val.reason.trim() }],
       };
       const ops = [{ op: 'update', col: 'usos', id: u.id, data }];
+      ops.push(...lockOpsAfterChange(u, next.driverEmail, next.status !== 'cerrado' && !u.anulado));
       // Si este uso era el abierto del vehículo y se cerró, el vehículo queda libre con su km de bajada.
       const veh = byId(state.vehicles, u.vehicleId);
       if (veh && veh.openUsoId === u.id && next.status !== 'abierto') {
@@ -557,8 +596,20 @@ function usoCorrectionForm(id) {
   });
 }
 
+// Ajusta el candado «un uso abierto por chofer» después de corregir, cerrar o anular un uso.
+function lockOpsAfterChange(u, newDriver, stillOpen) {
+  const ops = [];
+  const oldLock = lockOf(u.driverEmail);
+  const pointsHere = oldLock?.usoId === u.id;
+  if (pointsHere && (!stillOpen || newDriver !== u.driverEmail)) ops.push({ op: 'delete', col: 'locks', id: u.driverEmail });
+  if (stillOpen && !(pointsHere && newDriver === u.driverEmail) && !lockOf(newDriver)) {
+    ops.push({ op: 'set', col: 'locks', id: newDriver, data: { usoId: u.id, vehicleId: u.vehicleId, at: u.startAt } });
+  }
+  return ops;
+}
+
 function isLatestUso(u) {
-  const last = state.usos.filter((x) => x.vehicleId === u.vehicleId && x.endAt).sort((a, b) => b.endAt - a.endAt)[0];
+  const last = state.usos.filter((x) => !x.anulado && x.vehicleId === u.vehicleId && x.endAt).sort((a, b) => b.endAt - a.endAt)[0];
   return last?.id === u.id;
 }
 
@@ -569,14 +620,43 @@ function markUsoReviewed(id) {
   toast('Marcado como revisado.');
 }
 
-function deleteUso(id) {
+// Los usos no se borran: se anulan. Dejan de contar en reportes y avisos, pero siguen en el historial.
+function annulUsoForm(id) {
   const u = byId(state.usos, id);
-  if (!u || !confirm('¿Eliminar este uso? No se puede deshacer.')) return;
-  const ops = [...removeAttachmentOps(u.photoStart), ...removeAttachmentOps(u.photoEnd), { op: 'delete', col: 'usos', id }];
-  const veh = byId(state.vehicles, u.vehicleId);
-  if (veh?.openUsoId === id) ops.push({ op: 'update', col: 'vehicles', id: veh.id, data: { status: 'disponible', openUsoId: null, driverEmail: null, driverName: null, usoStartAt: null } });
-  FlotaCloud.write(ops);
-  closeSheet();
+  if (!u) return;
+  openForm({
+    title: 'Anular uso',
+    submitLabel: 'Anular uso',
+    fields: [
+      { type: 'html', html: `<p class="sub">${esc(u.driverName || u.driverEmail)} · ${esc(u.vehicleName || vehicleName(u.vehicleId))} · ${esc(fmtDateTime(u.startAt))}</p><p class="sub">El uso queda en el historial marcado como anulado y no cuenta en reportes ni avisos. No se borra.</p>` },
+      { name: 'motivo', label: 'Motivo', type: 'textarea', value: '', required: true, placeholder: 'Ej.: cargado dos veces por error' },
+    ],
+    onSubmit: (val) => {
+      const motivo = val.motivo.trim();
+      if (!motivo) throw new FormError('Escribí el motivo.');
+      const ops = [{
+        op: 'update', col: 'usos', id: u.id,
+        data: {
+          anulado: true, anuladoPor: stamp(), anuladoEn: Date.now(), motivo,
+          corrections: [...(u.corrections || []), { by: stamp(), at: Date.now(), changes: { anulado: [false, true] }, reason: motivo }],
+        },
+      }];
+      ops.push(...lockOpsAfterChange(u, u.driverEmail, false));
+      const veh = byId(state.vehicles, u.vehicleId);
+      if (veh?.openUsoId === u.id) ops.push({ op: 'update', col: 'vehicles', id: veh.id, data: { status: veh.status === 'uso' ? 'disponible' : veh.status, openUsoId: null, driverEmail: null, driverName: null, usoStartAt: null } });
+      FlotaCloud.write(ops);
+      toast('Uso anulado. Sigue en el historial.');
+    },
+  });
+}
+
+function unannulUso(id) {
+  const u = byId(state.usos, id);
+  if (!u || !confirm('¿Quitar la anulación? El uso vuelve a contar en reportes y avisos.')) return;
+  FlotaCloud.patch('usos', id, {
+    anulado: false,
+    corrections: [...(u.corrections || []), { by: stamp(), at: Date.now(), changes: { anulado: [true, false] }, reason: 'Se quitó la anulación' }],
+  });
 }
 
 /* ---------- Usuarios, obras y configuración ---------- */
@@ -621,7 +701,7 @@ function obraForm(id) {
       { name: 'active', label: 'Activa (aparece para elegir)', type: 'check', value: o ? o.active !== false : true },
     ],
     onSubmit: (val) => {
-      const data = { ...(o || { id: uid(), createdBy: stamp() }), name: val.name.trim(), active: !!val.active };
+      const data = { ...(o || { id: uid(), createdBy: stamp(), createdAt: Date.now() }), name: val.name.trim(), active: !!val.active, updatedBy: stamp(), updatedAt: Date.now() };
       FlotaCloud.put('obras', data.id, data);
     },
     onDelete: o ? () => FlotaCloud.del('obras', o.id) : null,

@@ -34,7 +34,7 @@ after(() => env.cleanup());
 const db = (email) => env.authenticatedContext(email, { email, email_verified: true }).firestore();
 const anon = () => env.unauthenticatedContext().firestore();
 const stamp = (email) => ({ email, name: email.split('@')[0] });
-const file = (id) => ({ id, name: 'foto.jpg', type: 'image/jpeg', size: 1000, chunks: 1 });
+const file = (id) => ({ id: `foto-${id}`, name: 'foto.jpg', type: 'image/jpeg', size: 1000, chunks: 1 });
 
 beforeEach(async () => {
   await env.clearFirestore();
@@ -45,6 +45,7 @@ beforeEach(async () => {
     await setDoc(doc(f, 'users', CH2), { email: CH2, role: 'chofer', active: true });
     await setDoc(doc(f, 'users', OFF), { email: OFF, role: 'chofer', active: false });
     await setDoc(doc(f, 'vehicles', 'v1'), { id: 'v1', name: 'Kangoo', km: 1000, status: 'disponible', active: true, openUsoId: null });
+    await setDoc(doc(f, 'vehicles', 'v3'), { id: 'v3', name: 'Partner', km: 3000, status: 'disponible', active: true, openUsoId: null });
     await setDoc(doc(f, 'vehicles', 'v2'), { id: 'v2', name: 'Moto', km: 500, status: 'taller', active: true, openUsoId: null });
     await setDoc(doc(f, 'obras', 'o1'), { id: 'o1', name: 'Obra Norte', active: true });
     await setDoc(doc(f, 'tasks', 't1'), { id: 't1', vehicleId: 'v1', name: 'Aceite' });
@@ -67,20 +68,23 @@ function newUso(email, id, extra = {}) {
 }
 
 // Inicia un uso como lo hace la app: uso nuevo + vehículo «en uso» (+ marca el anterior si había).
-function startBatch(f, email, id, prevOpen = null) {
+function startBatch(f, email, id, prevOpen = null, vehicleId = 'v1', km = null) {
   const b = writeBatch(f);
-  b.set(doc(f, 'usos', id), newUso(email, id));
-  b.update(doc(f, 'vehicles', 'v1'), { status: 'uso', openUsoId: id, driverEmail: email, driverName: 'x', usoStartAt: Date.now() });
+  const kmPrev = { v1: 1000, v2: 500, v3: 3000 }[vehicleId];
+  b.set(doc(f, 'usos', id), newUso(email, id, { vehicleId, kmPrev: km ?? kmPrev }));
+  b.update(doc(f, 'vehicles', vehicleId), { status: 'uso', openUsoId: id, driverEmail: email, driverName: 'x', usoStartAt: Date.now() });
+  b.set(doc(f, 'locks', email), { usoId: id, vehicleId, at: Date.now() });
   if (prevOpen) b.update(doc(f, 'usos', prevOpen), { status: 'sin_cerrar', flaggedBy: stamp(email), flaggedAt: serverTimestamp() });
   return b.commit();
 }
 
-function endBatch(f, email, id, kmEnd, vehicleKm = kmEnd) {
+function endBatch(f, email, id, kmEnd, vehicleKm = kmEnd, withVehicle = true) {
   const b = writeBatch(f);
+  b.delete(doc(f, 'locks', email));
   b.update(doc(f, 'usos', id), {
     status: 'cerrado', endAt: Date.now(), kmEnd, photoEnd: file(`${id}-b`), notes: '', closedBy: stamp(email), closedAt: serverTimestamp(),
   });
-  b.update(doc(f, 'vehicles', 'v1'), { status: 'disponible', openUsoId: null, driverEmail: null, driverName: null, usoStartAt: null, km: vehicleKm, kmAt: Date.now() });
+  if (withVehicle) b.update(doc(f, 'vehicles', 'v1'), { status: 'disponible', openUsoId: null, driverEmail: null, driverName: null, usoStartAt: null, km: vehicleKm, kmAt: Date.now() });
   return b.commit();
 }
 
@@ -103,7 +107,10 @@ test('nadie puede darse de alta solo ni subirse de rol', async () => {
   await assertFails(setDoc(doc(db(RANDOM), 'users', RANDOM), { email: RANDOM, role: 'admin', active: true }));
   await assertFails(updateDoc(doc(db(CH1), 'users', CH1), { role: 'admin' }));
   await assertFails(setDoc(doc(db(CH1), 'users', 'otro@test.com'), { email: 'otro@test.com', role: 'chofer', active: true }));
-  await assertSucceeds(updateDoc(doc(db(CH1), 'users', CH1), { name: 'Chofer Uno' }));
+  // el chofer no se cambia el nombre (sólo admin); sí se actualizan su foto y último ingreso
+  await assertFails(updateDoc(doc(db(CH1), 'users', CH1), { name: 'Chofer Uno' }));
+  await assertSucceeds(updateDoc(doc(db(CH1), 'users', CH1), { photoURL: 'https://x/y.jpg', lastLogin: Date.now() }));
+  await assertSucceeds(updateDoc(doc(db(OWNER), 'users', CH1), { name: 'Chofer Uno' }));
 });
 
 /* ---------- Chofer: lo que NO puede leer ---------- */
@@ -142,16 +149,54 @@ test('iniciar uso: se crea el uso y el vehículo pasa a en uso', async () => {
   await assertSucceeds(startBatch(db(CH1), CH1, 'u1'));
 });
 
+// Lote completo de inicio (uso + vehículo + candado) con algo del uso cambiado, para probar cada validación.
+function startWith(f, email, id, overrides = {}, { vehicleId = 'v1', lock = true, vehicle = true } = {}) {
+  const b = writeBatch(f);
+  b.set(doc(f, 'usos', id), newUso(email, id, { vehicleId, kmPrev: { v1: 1000, v2: 500, v3: 3000 }[vehicleId], ...overrides }));
+  if (vehicle) b.update(doc(f, 'vehicles', vehicleId), { status: 'uso', openUsoId: id, driverEmail: email, driverName: 'x', usoStartAt: Date.now() });
+  if (lock) b.set(doc(f, 'locks', email), { usoId: id, vehicleId, at: Date.now() });
+  return b.commit();
+}
+
 test('iniciar uso: no se puede a nombre de otro, sin foto, con hora vieja o en un vehículo en taller', async () => {
   const f = db(CH1);
-  await assertFails(setDoc(doc(f, 'usos', 'x1'), newUso(CH2, 'x1')));
-  await assertFails(setDoc(doc(f, 'usos', 'x2'), newUso(CH1, 'x2', { photoStart: null })));
-  await assertFails(setDoc(doc(f, 'usos', 'x3'), newUso(CH1, 'x3', { startAt: Date.now() - 10 * 86400000 })));
-  await assertFails(setDoc(doc(f, 'usos', 'x4'), newUso(CH1, 'x4', { status: 'cerrado' })));
-  const b = writeBatch(f);
-  b.set(doc(f, 'usos', 'x5'), { ...newUso(CH1, 'x5'), vehicleId: 'v2' });
-  b.update(doc(f, 'vehicles', 'v2'), { status: 'uso', openUsoId: 'x5', driverEmail: CH1, driverName: 'x', usoStartAt: Date.now() });
-  await assertFails(b.commit());
+  await assertFails(startWith(f, CH1, 'x1', { driverEmail: CH2 }));
+  await assertFails(startWith(f, CH1, 'x2', { photoStart: null }));
+  await assertFails(startWith(f, CH1, 'x3', { startAt: Date.now() - 10 * 86400000 }));
+  await assertFails(startWith(f, CH1, 'x4', { status: 'cerrado' }));
+  await assertFails(startWith(f, CH1, 'x5', {}, { vehicleId: 'v2' })); // v2 está en taller
+  await assertFails(startWith(f, CH1, 'x6', { photoStart: { id: 'foto-x6', chunks: 9 } })); // foto demasiado grande
+  await assertSucceeds(startWith(f, CH1, 'ok1')); // el mismo lote sin trampas pasa
+});
+
+test('iniciar uso: kmPrev tiene que ser el km real del vehículo (no se puede esconder el aviso de km raros)', async () => {
+  const f = db(CH1);
+  await assertFails(startWith(f, CH1, 'k1', { kmStart: 1500, kmPrev: 1500 }));
+  await assertFails(startWith(f, CH1, 'k2', { kmPrev: null }));
+  await assertSucceeds(startWith(f, CH1, 'k3', { kmStart: 1500, kmPrev: 1000 })); // km distinto: se permite, queda el aviso
+});
+
+test('iniciar uso: no se pueden crear usos sueltos (sin actualizar el vehículo o sin candado)', async () => {
+  const f = db(CH1);
+  await assertFails(setDoc(doc(f, 'usos', 's1'), newUso(CH1, 's1')));
+  await assertFails(startWith(f, CH1, 's2', {}, { vehicle: false }));
+  await assertFails(startWith(f, CH1, 's3', {}, { lock: false }));
+  // tampoco el encargado puede crear un uso sin que el vehículo apunte a él
+  await assertFails(setDoc(doc(db(ENC), 'usos', 's4'), newUso(ENC, 's4')));
+});
+
+test('un chofer no puede tener dos usos abiertos a la vez', async () => {
+  const f = db(CH1);
+  await assertSucceeds(startBatch(f, CH1, 'u1', null, 'v1'));
+  await assertFails(startBatch(f, CH1, 'u2', null, 'v3'));
+  // no puede borrar el candado sin cerrar el uso
+  await assertFails(deleteDoc(doc(f, 'locks', CH1)));
+  // cerrando el primero, ya puede iniciar otro
+  await assertSucceeds(endBatch(f, CH1, 'u1', 1080));
+  await assertSucceeds(startBatch(f, CH1, 'u3', null, 'v3'));
+  // el candado de otro no lo puede leer ni tocar
+  await assertFails(getDoc(doc(db(CH2), 'locks', CH1)));
+  await assertFails(setDoc(doc(db(CH2), 'locks', CH1), { usoId: 'zz', vehicleId: 'v1', at: Date.now() }));
 });
 
 test('iniciar uso con otro uso abierto: se permite y el anterior queda «sin cerrar»', async () => {
@@ -228,13 +273,46 @@ test('cargar nafta: no puede cargar otro tipo de gasto ni a nombre de otro', asy
   await assertFails(setDoc(doc(f, 'expenses', 'c5'), carga(CH1, 'c5', { photo: null })));
 });
 
-test('fotos: el chofer sube la del tablero/ticket pero no la pisa ni sube otra cosa', async () => {
+test('fotos: el chofer sube la del tablero/ticket pero no la pisa, no sube otra cosa y respeta tamaño y cantidad', async () => {
   const f = db(CH1);
-  await assertSucceeds(setDoc(doc(f, 'files', 'new_0'), { fileId: 'new', i: 0, n: 1, kind: 'tablero', owner: CH1, data: 'AAA' }));
-  await assertFails(setDoc(doc(f, 'files', 'new_0'), { fileId: 'new', i: 0, n: 1, kind: 'tablero', owner: CH1, data: 'BBB' }));
-  await assertFails(setDoc(doc(f, 'files', 'pic_0'), { fileId: 'pic', i: 0, n: 1, kind: 'vehicle', owner: CH1, data: 'BBB' }));
-  await assertFails(setDoc(doc(f, 'files', 'x_0'), { fileId: 'x', i: 0, n: 1, kind: 'vehicle', owner: CH1, data: 'A' }));
-  await assertFails(setDoc(doc(f, 'files', 'y_0'), { fileId: 'y', i: 0, n: 1, kind: 'ticket', owner: CH2, data: 'A' }));
+  const chunk = (fileId, i, extra = {}) => ({ fileId, i, n: 1, kind: 'tablero', owner: CH1, data: 'AAA', ...extra });
+  await assertSucceeds(setDoc(doc(f, 'files', 'foto-new_0'), chunk('foto-new', 0)));
+  await assertFails(setDoc(doc(f, 'files', 'foto-new_0'), chunk('foto-new', 0, { data: 'BBB' }))); // no la pisa
+  await assertFails(setDoc(doc(f, 'files', 'pic_0'), chunk('pic', 0, { kind: 'vehicle' })));
+  await assertFails(setDoc(doc(f, 'files', 'foto-x_0'), chunk('foto-x', 0, { kind: 'vehicle' })));
+  await assertFails(setDoc(doc(f, 'files', 'foto-y_0'), chunk('foto-y', 0, { kind: 'ticket', owner: CH2 })));
+  await assertFails(setDoc(doc(f, 'files', 'foto-z_0'), chunk('foto-z', 0, { n: 5 }))); // demasiados pedazos
+  await assertFails(setDoc(doc(f, 'files', 'foto-z_3'), chunk('foto-z', 3, { n: 2 }))); // pedazo fuera de rango
+  await assertFails(setDoc(doc(f, 'files', 'otro-id_0'), chunk('foto-w', 0))); // el id no coincide
+  await assertFails(setDoc(doc(f, 'files', 'foto-v_0'), chunk('foto-v', 0, { data: 'A'.repeat(700001) }))); // muy grande
+  await assertFails(setDoc(doc(f, 'files', 'foto-u_0'), chunk('foto-u', 0, { extra: 'x' }))); // campos de más
+  await assertSucceeds(setDoc(doc(f, 'files', 'foto-t_1'), chunk('foto-t', 1, { n: 2 })));
+});
+
+test('cargar nafta: valida vehículo y fecha', async () => {
+  const f = db(CH1);
+  await assertFails(setDoc(doc(f, 'expenses', 'c6'), carga(CH1, 'c6', { vehicleId: 'no-existe' })));
+  await assertFails(setDoc(doc(f, 'expenses', 'c7'), carga(CH1, 'c7', { date: 'ayer' })));
+  await assertFails(setDoc(doc(f, 'expenses', 'c8'), carga(CH1, 'c8', { date: null })));
+  await assertSucceeds(setDoc(doc(f, 'expenses', 'c9'), carga(CH1, 'c9')));
+});
+
+test('los usos no se borran (ni admin): se anulan, y un uso anulado el chofer ya no lo cierra', async () => {
+  await assertSucceeds(startBatch(db(CH1), CH1, 'u1'));
+  await assertFails(deleteDoc(doc(db(OWNER), 'usos', 'u1')));
+  await assertFails(deleteDoc(doc(db(ENC), 'usos', 'u1')));
+  await assertSucceeds(updateDoc(doc(db(ENC), 'usos', 'u1'), { anulado: true, anuladoPor: stamp(ENC), anuladoEn: Date.now(), motivo: 'Cargado por error' }));
+  await assertFails(updateDoc(doc(db(CH1), 'usos', 'u1'), {
+    status: 'cerrado', endAt: Date.now(), kmEnd: 1050, photoEnd: file('b'), notes: '', closedBy: stamp(CH1), closedAt: serverTimestamp(),
+  }));
+});
+
+test('el dueño entra aunque su documento diga inactivo', async () => {
+  await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'users', OWNER), { email: OWNER, role: 'chofer', active: false }));
+  const f = db(OWNER);
+  await assertSucceeds(getDocs(collection(f, 'usos')));
+  await assertSucceeds(getDocs(collection(f, 'users')));
+  await assertSucceeds(updateDoc(doc(f, 'users', OWNER), { role: 'admin', active: true }));
 });
 
 /* ---------- Encargado y admin ---------- */

@@ -433,9 +433,19 @@ function showFormError(msg) {
 
 document.getElementById('modal-cancel').addEventListener('click', () => modal.close());
 
-modalDelete.addEventListener('click', async () => {
+// Igual que al guardar: no se espera al servidor (sin señal queda en cola). Si las reglas lo rechazan,
+// FlotaCloud avisa con un mensaje de error.
+modalDelete.addEventListener('click', () => {
   if (!confirm('¿Eliminar este registro? No se puede deshacer.')) return;
-  await modalHandlers.onDelete();
+  try {
+    const p = modalHandlers.onDelete();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+    toast(navigator.onLine ? 'Eliminado.' : 'Eliminado en el celular. Se sincroniza cuando vuelva la señal.');
+  } catch (e) {
+    console.error(e);
+    toast(`No se pudo eliminar: ${e.message}`, { error: true });
+    return;
+  }
   modal.close();
   scheduleRender();
 });

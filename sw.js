@@ -1,6 +1,6 @@
 // Guarda la app en el celular para que abra sin señal y manda avisos en segundo plano.
 // Al cambiar cualquier archivo, subí este número para que los dispositivos bajen la versión nueva.
-const CACHE = 'flota-v1';
+const CACHE = 'flota-v2';
 const ASSETS = [
   './',
   'index.html',
@@ -69,21 +69,45 @@ self.addEventListener('fetch', (event) => {
 
   if (url.origin !== location.origin) return;
 
-  // Archivos de la app: primero la red (para recibir cambios); si no hay conexión, lo guardado.
+  // Archivos de la app: primero la red (para recibir cambios), pero si no contesta en 3 segundos
+  // (obras con mala señal) se usa lo guardado en el celular. La respuesta de la red, si llega después,
+  // igual se guarda para la próxima vez.
   // «no-cache» obliga a preguntarle al servidor si hay versión nueva: GitHub Pages deja que el navegador
   // guarde los archivos 10 minutos y, sin esto, el celular podía seguir con el código viejo.
-  event.respondWith(
-    fetch(request, { cache: 'no-cache' })
-      .then((response) => {
-        if (response.ok) {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, copy));
-        }
-        return response;
-      })
-      .catch(() => caches.match(request, { ignoreSearch: true }).then((r) => r || caches.match('index.html'))),
-  );
+  event.respondWith(networkWithTimeout(request, event));
 });
+
+const NETWORK_TIMEOUT_MS = 3000;
+
+function cachedFallback(request) {
+  return caches.match(request, { ignoreSearch: true })
+    .then((r) => r || (request.mode === 'navigate' ? caches.match('index.html') : null));
+}
+
+function networkWithTimeout(request, event) {
+  const network = fetch(request, { cache: 'no-cache' }).then((response) => {
+    if (response.ok) {
+      const copy = response.clone();
+      caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => {});
+    }
+    return response;
+  });
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => { if (!done && r) { done = true; resolve(r); } };
+    const timer = setTimeout(() => {
+      // Sin copia guardada: se sigue esperando a la red.
+      cachedFallback(request).then((cached) => { if (cached) finish(cached); });
+    }, NETWORK_TIMEOUT_MS);
+    network.then((r) => {
+      clearTimeout(timer);
+      finish(r);
+    }).catch(() => {
+      clearTimeout(timer);
+      cachedFallback(request).then((cached) => finish(cached || Response.error()));
+    });
+  });
+}
 
 /* ---------- Avisos en segundo plano (Periodic Background Sync, Chrome en Android) ---------- */
 

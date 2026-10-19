@@ -8,7 +8,8 @@ rules_version = '2';
 //   admin      → todo, incluida la gestión de usuarios.
 //   encargado  → todo menos usuarios y roles.
 //   chofer     → sólo iniciar uso, terminar su uso y cargar nafta. No lee historial, gastos ni nada más.
-// El mail del dueño siempre es admin, aunque no tenga su documento en users (sirve para el primer ingreso).
+// El mail del dueño siempre es admin, aunque no tenga su documento en users o figure inactivo.
+// Los usos no se borran nunca: se anulan (anulado: true) y quedan en el historial.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -50,7 +51,7 @@ service cloud.firestore {
     }
 
     function isDriver() {
-      return hasRole(['chofer']);
+      return !isOwner() && hasRole(['chofer']);
     }
 
     function isMember() {
@@ -77,12 +78,22 @@ service cloud.firestore {
       return request.resource.data[field].email == myEmail();
     }
 
-    function validFile(f) {
-      return f == null || (f is map && f.id is string && f.chunks is int && f.chunks >= 1 && f.chunks <= 4);
+    // Foto subida por el chofer: como mucho 2 pedazos (las fotos se comprimen a menos de 900 KB).
+    function validDriverFile(f) {
+      return f is map && f.id is string && f.id.size() <= 40 && f.chunks is int && f.chunks >= 1 && f.chunks <= 2;
+    }
+
+    function vehiclePath(id) {
+      return /databases/$(database)/documents/vehicles/$(id);
     }
 
     function usoPath(id) {
       return /databases/$(database)/documents/usos/$(id);
+    }
+
+    // Candado: cada chofer tiene a lo sumo un uso abierto (locks/{mail} apunta a ese uso).
+    function lockPath(email) {
+      return /databases/$(database)/documents/locks/$(email);
     }
 
     /* ---------- Usuarios ---------- */
@@ -102,9 +113,9 @@ service cloud.firestore {
       allow create: if isOwner() && email == myEmail()
         && request.resource.data.role == 'admin' && request.resource.data.active == true;
 
-      // Cualquier usuario activo puede actualizar su nombre y foto de Google, nada más.
+      // Un usuario activo sólo actualiza su foto de Google y su último ingreso. El nombre lo pone el admin.
       allow update: if signedIn() && email == myEmail() && resource.data.active == true
-        && changed().hasOnly(['name', 'photoURL', 'lastLogin']);
+        && changed().hasOnly(['photoURL', 'lastLogin']);
     }
 
     /* ---------- Configuración y obras ---------- */
@@ -166,9 +177,12 @@ service cloud.firestore {
         || (isDriver() && resource.data.driverEmail == myEmail()
             && resource.data.status in ['abierto', 'sin_cerrar']);
 
-      allow create: if isStaff() || driverCreatesUso();
+      // Nadie crea un uso suelto: en el mismo lote el vehículo tiene que quedar apuntando a este uso.
+      allow create: if (isStaff() && getAfter(vehiclePath(request.resource.data.vehicleId)).data.openUsoId == id)
+        || driverCreatesUso();
       allow update: if isStaff() || driverClosesUso() || driverFlagsUnclosed();
-      allow delete: if isStaff();
+      // Los usos no se borran: se anulan.
+      allow delete: if false;
 
       function driverCreatesUso() {
         let d = request.resource.data;
@@ -184,8 +198,15 @@ service cloud.firestore {
           && plausibleTime(d.startAt)
           && d.kmStart is number && d.kmStart >= 0
           && d.vehicleId is string
-          && validFile(d.photoStart) && d.photoStart != null
-          && d.obraName is string && d.obraName.size() > 0;
+          // El «último km de bajada» es el km real del vehículo: el chofer no puede esconder el aviso de km raros.
+          && d.kmPrev == get(vehiclePath(d.vehicleId)).data.km
+          // El vehículo queda apuntando a este uso en el mismo lote.
+          && getAfter(vehiclePath(d.vehicleId)).data.openUsoId == id
+          // Un solo uso abierto por chofer: no tenía candado y queda uno nuevo para este uso.
+          && !exists(lockPath(myEmail()))
+          && getAfter(lockPath(myEmail())).data.usoId == id
+          && validDriverFile(d.photoStart)
+          && d.obraName is string && d.obraName.size() > 0 && d.obraName.size() <= 120;
       }
 
       // Terminar el propio uso (abierto, o marcado «sin cerrar» porque otro ya inició uno).
@@ -195,11 +216,12 @@ service cloud.firestore {
         return isDriver()
           && resource.data.driverEmail == myEmail()
           && resource.data.status in ['abierto', 'sin_cerrar']
+          && resource.data.get('anulado', false) != true
           && changed().hasOnly(['status', 'endAt', 'kmEnd', 'photoEnd', 'notes', 'closedBy', 'closedAt', 'wasUnclosed'])
           && d.status == 'cerrado'
           && d.kmEnd is number && d.kmEnd > resource.data.kmStart
           && plausibleTime(d.endAt) && d.endAt >= resource.data.startAt
-          && validFile(d.photoEnd) && d.photoEnd != null
+          && validDriverFile(d.photoEnd)
           && (!('notes' in d) || (d.notes is string && d.notes.size() <= 2000))
           && stampedByMe('closedBy')
           && d.closedAt == request.time;
@@ -208,7 +230,7 @@ service cloud.firestore {
       // Si alguien inicia un uso en un vehículo con otro uso abierto, ese uso queda «sin cerrar» para revisión.
       // Sólo vale en el mismo lote en que ese chofer toma el vehículo con un uso nuevo.
       function driverFlagsUnclosed() {
-        let v = getAfter(/databases/$(database)/documents/vehicles/$(resource.data.vehicleId)).data;
+        let v = getAfter(vehiclePath(resource.data.vehicleId)).data;
         return isDriver()
           && resource.data.status == 'abierto'
           && v.openUsoId != id
@@ -218,6 +240,24 @@ service cloud.firestore {
           && stampedByMe('flaggedBy')
           && request.resource.data.flaggedAt == request.time;
       }
+    }
+
+    /* ---------- Candado de uso abierto por chofer ---------- */
+
+    match /locks/{email} {
+      allow read: if isStaff() || (isDriver() && email == myEmail());
+      allow update: if isStaff();
+      // Se crea junto con el uso nuevo del chofer.
+      allow create: if isStaff()
+        || (isDriver() && email == myEmail()
+            && request.resource.data.keys().hasOnly(['usoId', 'vehicleId', 'at'])
+            && request.resource.data.usoId is string
+            && exists(usoPath(request.resource.data.usoId)) == false
+            && getAfter(usoPath(request.resource.data.usoId)).data.driverEmail == myEmail());
+      // Se borra cuando ese uso queda cerrado (en el mismo lote).
+      allow delete: if isStaff()
+        || (isDriver() && email == myEmail()
+            && getAfter(usoPath(resource.data.usoId)).data.status == 'cerrado');
     }
 
     /* ---------- Gastos (incluye las cargas de nafta) ---------- */
@@ -235,13 +275,18 @@ service cloud.firestore {
           && d.id == id
           && d.cat == 'combustible'
           && d.source == 'carga'
+          && d.vehicleId is string
+          && exists(vehiclePath(d.vehicleId))
+          && get(vehiclePath(d.vehicleId)).data.active == true
+          && d.date is string && d.date.matches('^20[0-9]{2}-[01][0-9]-[0-3][0-9]$')
           && stampedByMe('createdBy')
           && d.createdAt == request.time
           && plausibleTime(d.at)
           && d.km is number && d.km >= 0
           && d.liters is number && d.liters > 0 && d.liters < 500
-          && d.amount is number && d.amount > 0
-          && validFile(d.photo) && d.photo != null;
+          && d.amount is number && d.amount > 0 && d.amount < 100000000
+          && (!('station' in d) || (d.station is string && d.station.size() <= 120))
+          && validDriverFile(d.photo);
       }
     }
 
@@ -267,11 +312,19 @@ service cloud.firestore {
       allow list: if isStaff();
       allow write: if isStaff();
       // El chofer sube las fotos del tablero y del ticket, pero no puede leerlas ni pisarlas después.
-      allow create: if isDriver()
-        && request.resource.data.owner == myEmail()
-        && request.resource.data.kind in ['tablero', 'ticket']
-        && request.resource.data.data is string
-        && request.resource.data.data.size() <= 750000;
+      // Cada foto: como mucho 2 pedazos de hasta 700.000 caracteres, con el nombre «<archivo>_<n>».
+      allow create: if isDriver() && validDriverChunk(request.resource.data);
+
+      function validDriverChunk(c) {
+        return c.keys().hasOnly(['fileId', 'i', 'n', 'kind', 'owner', 'data'])
+          && c.owner == myEmail()
+          && c.kind in ['tablero', 'ticket']
+          && c.fileId is string && c.fileId.size() >= 6 && c.fileId.size() <= 40
+          && c.n is int && c.n >= 1 && c.n <= 2
+          && c.i is int && c.i >= 0 && c.i < c.n
+          && chunkId == c.fileId + '_' + string(c.i)
+          && c.data is string && c.data.size() > 0 && c.data.size() <= 700000;
+      }
     }
 
     // Cualquier otra cosa queda cerrada.

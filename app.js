@@ -100,7 +100,14 @@ const actions = {
   fuel: (el) => fuelForm(el.dataset.id || ui.driverVehicle),
   'open-alert': (el) => openAlert(el.dataset.kind, el.dataset.id),
   'all-alerts': () => openAllAlerts(),
-  'open-vehicle': (el) => { ui.tab = 'vehicles'; ui.vehicleId = el.dataset.id; ui.vehicleSeg = 'resumen'; window.scrollTo(0, 0); render(); },
+  'open-vehicle': (el) => {
+    if (!el.dataset.id) return;
+    ui.tab = 'vehicles';
+    ui.vehicleId = el.dataset.id;
+    ui.vehicleSeg = el.dataset.segOpen || 'resumen';
+    window.scrollTo(0, 0);
+    render();
+  },
   'back-vehicles': () => { ui.vehicleId = null; render(); },
   'add-vehicle': () => vehicleForm(null),
   'edit-vehicle': (el) => vehicleForm(el.dataset.id),
@@ -266,7 +273,7 @@ function startData() {
   unsubs.push(FlotaCloud.subscribe('vehicles', set('vehicles'), onDataError));
   unsubs.push(FlotaCloud.subscribe('obras', set('obras'), onDataError));
   if (isStaff()) {
-    for (const c of ['usos', 'expenses', 'tasks', 'docs', 'fines', 'users']) unsubs.push(FlotaCloud.subscribe(c, set(c), onDataError));
+    for (const c of ['usos', 'expenses', 'tasks', 'docs', 'fines', 'users', 'locks']) unsubs.push(FlotaCloud.subscribe(c, set(c), onDataError));
     unsubs.push(FlotaCloud.subscribeDoc('config', 'general', (data, meta) => {
       state.config = { ...DEFAULT_CONFIG, ...(data || {}) };
       if (!data && !meta.fromCache && state.me.email === OWNER) seedFleet();
@@ -275,23 +282,35 @@ function startData() {
   } else {
     // El chofer sólo ve sus usos abiertos (las reglas no le dejan ver más).
     unsubs.push(FlotaCloud.subscribe('usos', set('usos'), onDataError, [['driverEmail', '==', state.me.email], ['status', 'in', ['abierto', 'sin_cerrar']]]));
+    unsubs.push(FlotaCloud.subscribeDoc('locks', state.me.email, (data) => {
+      state.locks = data ? [data] : [];
+      scheduleRender();
+    }, onDataError));
     for (const c of ['expenses', 'tasks', 'docs', 'fines', 'users']) state[c] = [];
   }
 }
 
 // Primera vez: 2 utilitarios y 1 moto con sus tareas de service y papeles básicos. Después se editan.
+// Se crea sólo si el servidor confirma que no hay ningún vehículo (la caché del celular puede estar vacía o vieja).
 let seeded = false;
-function seedFleet() {
+async function seedFleet() {
   if (seeded) return;
   seeded = true;
+  let serverVehicles;
+  try {
+    serverVehicles = await FlotaCloud.getAllFromServer('vehicles');
+  } catch (e) {
+    seeded = false; // sin señal: se reintenta la próxima vez
+    return;
+  }
   const ops = [{ op: 'set', col: 'config', id: 'general', data: { ...DEFAULT_CONFIG, seededAt: Date.now(), seededBy: stamp() } }];
-  if (!state.vehicles.length) {
+  if (!serverVehicles.length) {
     [['Utilitario 1', 'utilitario'], ['Utilitario 2', 'utilitario'], ['Moto', 'moto']].forEach(([name, type], i) => {
       ops.push(...newVehicleOps({ id: uid(), name, type, plate: '', brand: '', year: null, km: 0, status: 'disponible', active: true, openUsoId: null, order: i, photo: null, notes: '', createdBy: stamp(), createdAt: FlotaCloud.serverTime() }));
     });
   }
   FlotaCloud.write(ops);
-  toast('Cargué los 3 vehículos de la flota. Editá nombre, patente y km desde «Vehículos».', { ms: 7000 });
+  if (!serverVehicles.length) toast('Cargué los 3 vehículos de la flota. Editá nombre, patente y km desde «Vehículos».', { ms: 7000 });
 }
 
 /* ---------- Ingreso ---------- */
@@ -311,6 +330,7 @@ function showAuth(name, detail = '') {
   authScreen.querySelector('[data-auth-retry]').hidden = name !== 'error';
   authScreen.querySelector('.auth-spinner').hidden = !['loading', 'sync'].includes(name);
   authScreen.querySelector('.auth-emu').hidden = !(FlotaCloud.useEmulator && ['login', 'denied'].includes(name));
+  if (name !== 'login') authScreen.querySelector('[data-auth-ios]').hidden = true;
   authScreen.hidden = false;
   if (name === 'denied') {
     stopData();
@@ -323,10 +343,14 @@ function showAuth(name, detail = '') {
 
 authScreen.addEventListener('click', async (ev) => {
   if (ev.target.closest('[data-auth-login]')) {
+    // En iPhone con la app instalada, si Google no vuelve en unos segundos, se explica qué hacer.
+    clearTimeout(iosTimer);
+    if (IS_IOS_STANDALONE) iosTimer = setTimeout(() => { if (!state.me) showIosHelp(); }, 12000);
     try {
       await FlotaCloud.signIn();
     } catch (e) {
-      if (!['auth/popup-closed-by-user', 'auth/cancelled-popup-request'].includes(e.code)) showAuth('error', `No se pudo entrar con Google (${e.code || e.message}).`);
+      if (IS_IOS_STANDALONE) showIosHelp();
+      else if (!['auth/popup-closed-by-user', 'auth/cancelled-popup-request'].includes(e.code)) showAuth('error', `No se pudo entrar con Google (${e.code || e.message}).`);
     }
   } else if (ev.target.closest('[data-auth-other]')) {
     await FlotaCloud.signOut();
@@ -343,6 +367,15 @@ authScreen.addEventListener('click', async (ev) => {
 
 let unsubMe = null;
 
+const IS_IOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IS_IOS_STANDALONE = IS_IOS && (navigator.standalone === true || matchMedia('(display-mode: standalone)').matches);
+let iosTimer = null;
+
+function showIosHelp() {
+  const box = authScreen.querySelector('[data-auth-ios]');
+  box.hidden = false;
+}
+
 async function start() {
   showAuth('loading');
   try {
@@ -352,6 +385,7 @@ async function start() {
     return;
   }
   FlotaCloud.onAuth((user) => {
+    clearTimeout(iosTimer);
     if (unsubMe) { unsubMe(); unsubMe = null; }
     stopData();
     closeSheet();
@@ -374,16 +408,19 @@ async function start() {
         FlotaCloud.put('users', email, { email, name: user.displayName || '', photoURL: user.photoURL || '', role: 'admin', active: true, addedAt: Date.now(), lastLogin: Date.now() });
         return;
       }
-      if (!data || data.active === false) {
+      if (!data || (data.active === false && !owner)) {
         showAuth('denied', email);
         return;
       }
+      // El dueño siempre entra: si su documento quedó inactivo o con otro rol, se repara.
+      if (owner && (data.active === false || data.role !== 'admin')) FlotaCloud.patch('users', email, { active: true, role: 'admin' });
       state.me = { email, name: data.name || user.displayName || email, role: owner ? 'admin' : data.role, photoURL: user.photoURL || data.photoURL || '' };
       // Completa el nombre y la foto de Google una vez por sesión (las reglas sólo dejan tocar esos campos).
       if (!touched) {
         touched = true;
         const upd = { lastLogin: Date.now() };
-        if (user.displayName && data.name !== user.displayName && !data.name) upd.name = user.displayName;
+        // El nombre lo pone el admin; sólo un admin completa el suyo con el de Google.
+        if ((owner || data.role === 'admin') && user.displayName && !data.name) upd.name = user.displayName;
         if (user.photoURL && data.photoURL !== user.photoURL) upd.photoURL = user.photoURL;
         FlotaCloud.patch('users', email, upd);
       }

@@ -361,6 +361,9 @@ table.report td.n, table.report th.n { text-align: right; }
 .auth-btn svg.icon { width: 20px; height: 20px; }
 .auth-spinner { width: 28px; height: 28px; margin: 14px auto; border-radius: 50%; border: 3px solid #dfe2e6; border-top-color: var(--red); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.auth-ios { margin-top: 16px; text-align: left; background: var(--warn-soft); color: #5c3a06; border-radius: 12px; padding: 12px 14px; font-size: .88rem; }
+.auth-ios p { margin: 6px 0; }
+.auth-ios ol { margin: 6px 0; padding-left: 20px; }
 .auth-emu { margin-top: 22px; display: grid; gap: 8px; padding: 12px; border: 1px dashed #c6ccd2; border-radius: 12px; }
 
 .toast {

@@ -70,24 +70,33 @@ window.FlotaCloud = (() => {
 
   const ref = (name, id) => fb.doc(db, name, id);
 
+  // Datos del documento con su id como propiedad oculta (_id): no se copia al guardar con {...item}.
+  const withId = (snap) => Object.defineProperty(snap.data(), '_id', { value: snap.id, enumerable: false });
+
   // Escucha una colección (o una consulta). cb(items, { fromCache, pending })
   function subscribe(name, cb, onError, filters = null) {
     let q = fb.collection(db, name);
     if (filters) q = fb.query(q, ...filters.map(([f, op, v]) => fb.where(f, op, v)));
     return fb.onSnapshot(q, { includeMetadataChanges: true }, (snap) => {
-      cb(snap.docs.map((d) => d.data()), { fromCache: snap.metadata.fromCache, pending: snap.metadata.hasPendingWrites });
+      cb(snap.docs.map(withId), { fromCache: snap.metadata.fromCache, pending: snap.metadata.hasPendingWrites });
     }, onError);
   }
 
   function subscribeDoc(name, id, cb, onError) {
     return fb.onSnapshot(ref(name, id), { includeMetadataChanges: true }, (snap) => {
-      cb(snap.exists() ? snap.data() : null, { fromCache: snap.metadata.fromCache, pending: snap.metadata.hasPendingWrites });
+      cb(snap.exists() ? withId(snap) : null, { fromCache: snap.metadata.fromCache, pending: snap.metadata.hasPendingWrites });
     }, onError);
   }
 
   async function getOne(name, id, fromServer = false) {
     const snap = fromServer ? await fb.getDocFromServer(ref(name, id)) : await fb.getDoc(ref(name, id));
     return snap.exists() ? snap.data() : null;
+  }
+
+  // Lee una colección completa confirmada por el servidor (no de la caché). Sin señal, tira error.
+  async function getAllFromServer(name) {
+    const snap = await fb.getDocsFromServer(fb.collection(db, name));
+    return snap.docs.map(withId);
   }
 
   /*
@@ -150,6 +159,7 @@ window.FlotaCloud = (() => {
     subscribe,
     subscribeDoc,
     getOne,
+    getAllFromServer,
     write,
     put,
     patch,

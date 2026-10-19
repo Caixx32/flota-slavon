@@ -209,6 +209,7 @@ const state = {
   docs: [],
   fines: [],
   users: [],
+  locks: [],         // candados de uso abierto (admin/encargado: todos; chofer: el suyo)
 };
 
 const isStaff = () => state.me && (state.me.role === 'admin' || state.me.role === 'encargado');
@@ -216,6 +217,8 @@ const isAdmin = () => state.me && state.me.role === 'admin';
 
 const byId = (list, id) => list.find((x) => x.id === id);
 const activeVehicles = () => state.vehicles.filter((v) => v.active !== false).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
+const lockOf = (email) => state.locks.find((l) => l._id === email) || null;
+const activeUsos = () => state.usos.filter((u) => !u.anulado);
 const vehicleName = (id) => byId(state.vehicles, id)?.name || 'Vehículo dado de baja';
 
 function stamp() {
@@ -364,8 +367,33 @@ async function fetchBlueRate() {
   }
 }
 
-// Cotización para un gasto. Es aproximada si no es del mismo día del gasto o si no hubo internet.
+// Cotización blue de una fecha pasada (api.argentinadatos.com). Devuelve el valor de venta o tira error.
+async function fetchHistoricRate(dateISO) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch(`https://api.argentinadatos.com/v1/cotizaciones/dolares/blue/${dateISO.replace(/-/g, '/')}`, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const value = Number((await res.json()).venta);
+    if (!value) throw new Error('Respuesta sin cotización');
+    return value;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/*
+ * Cotización para un gasto: la del día si es de hoy; la histórica de esa fecha si es pasada.
+ * Si no se consigue, la de hoy (o la última conocida) marcada como aproximada.
+ */
 async function rateFor(dateISO) {
+  if (dateISO && dateISO < today()) {
+    try {
+      return { usdRate: await fetchHistoricRate(dateISO), rateApprox: false };
+    } catch (e) {
+      // sigue con la de hoy, aproximada
+    }
+  }
   try {
     const value = await fetchBlueRate();
     return { usdRate: value, rateApprox: dateISO !== today() };
@@ -373,6 +401,11 @@ async function rateFor(dateISO) {
     const last = lastRate();
     return last ? { usdRate: last.value, rateApprox: true } : { usdRate: null, rateApprox: false };
   }
+}
+
+// Momento de un gasto: las cargas de nafta tienen fecha y hora («at»); el resto, sólo fecha.
+function expenseTime(e) {
+  return e.at || (e.date ? parseISO(e.date).getTime() : 0);
 }
 
 function inUsd(e) {
@@ -461,6 +494,7 @@ function usoKm(u) {
 
 // Problemas de un uso que tiene que revisar un admin o encargado.
 function usoIssues(u) {
+  if (u.anulado) return [];
   const out = [];
   const cfg = state.config;
   if (u.status === 'sin_cerrar') {
@@ -484,9 +518,19 @@ function usoIssues(u) {
 // Quién tenía el vehículo en un momento dado (para las multas).
 function driverAt(vehicleId, ms) {
   const u = state.usos
-    .filter((x) => x.vehicleId === vehicleId && x.startAt <= ms && (x.endAt ? x.endAt >= ms : true))
+    .filter((x) => !x.anulado && x.vehicleId === vehicleId && x.startAt <= ms && (x.endAt ? x.endAt >= ms : true))
     .sort((a, b) => b.startAt - a.startAt)[0];
   return u ? { email: u.driverEmail, name: u.driverName, usoId: u.id } : null;
+}
+
+/* ---------- Datos que faltan cargar ---------- */
+
+// Tareas de service sin último registro y papeles sin vencimiento (de los vehículos activos).
+function missingData() {
+  const vActive = new Set(activeVehicles().map((v) => v.id));
+  const tasks = state.tasks.filter((t) => vActive.has(t.vehicleId) && t.lastKm == null && !t.lastDate);
+  const docs = state.docs.filter((d) => vActive.has(d.vehicleId) && !d.expiry);
+  return { tasks, docs, total: tasks.length + docs.length };
 }
 
 /* ---------- Avisos ---------- */

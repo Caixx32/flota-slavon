@@ -17,8 +17,9 @@ function reportRange() {
 }
 
 function reportData({ from, to }) {
-  const usos = state.usos.filter((u) => inRange(u.startAt, from, to));
-  const expenses = state.expenses.filter((e) => e.date >= from && e.date <= to);
+  // Los usos anulados no cuentan en los reportes.
+  const usos = activeUsos().filter((u) => inRange(u.startAt, from, to));
+  const expenses = state.expenses.filter((e) => inRange(expenseTime(e), from, to));
   const cargas = expenses.filter((e) => e.cat === 'combustible');
 
   const group = (list, keyFn, init) => {
@@ -142,9 +143,9 @@ function usoRows(list) {
 }
 
 function cargaRows(list) {
-  return list.sort((a, b) => (a.at || 0) - (b.at || 0) || a.date.localeCompare(b.date)).map((e) => ({
+  return list.sort((a, b) => expenseTime(a) - expenseTime(b)).map((e) => ({
     Vehículo: e.vehicleName || vehicleName(e.vehicleId),
-    'Fecha y hora': e.at ? xDate(e.at) : xDay(e.date),
+    'Fecha y hora': xDate(expenseTime(e)),
     Km: e.km ?? null,
     Litros: e.liters ?? null,
     'Monto $': e.amount ?? null,
@@ -158,8 +159,8 @@ function cargaRows(list) {
 }
 
 function expenseRows(list) {
-  return list.sort((a, b) => a.date.localeCompare(b.date)).map((e) => ({
-    Fecha: xDay(e.date),
+  return list.sort((a, b) => expenseTime(a) - expenseTime(b)).map((e) => ({
+    Fecha: e.at ? xDate(e.at) : xDay(e.date),
     Vehículo: e.vehicleName || vehicleName(e.vehicleId),
     Categoría: CATEGORIES[e.cat]?.label || e.cat,
     Detalle: [e.note, e.station, e.liters ? `${num.format(e.liters)} l` : ''].filter(Boolean).join(' · '),
@@ -169,6 +170,46 @@ function expenseRows(list) {
     'Cotización aprox.': e.rateApprox ? 'Sí' : '',
     'Cargado por': e.createdBy?.name || '',
   }));
+}
+
+function summaryRows(d) {
+  const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
+  return {
+    drivers: d.drivers.map((x) => ({ Chofer: x.name, Usos: x.usos, Km: x.km, Horas: r2(x.hours) })),
+    vehicles: d.vehicles.map((x) => ({
+      Vehículo: x.name, Usos: x.usos, Km: x.km, 'Gasto $': r2(x.total), 'Gasto US$': r2(x.totalUsd), Litros: r2(x.liters), 'km/l': r2(x.kml), '$ por km': r2(x.perKm),
+    })),
+    obras: d.obras.map((x) => ({ 'Obra / destino': x.name, Usos: x.usos, Km: x.km, Horas: r2(x.hours) })),
+  };
+}
+
+function fineRows({ from, to }) {
+  return state.fines.filter((f) => f.date >= from && f.date <= to).sort((a, b) => a.date.localeCompare(b.date)).map((f) => ({
+    Fecha: xDay(f.date),
+    Hora: f.time || '',
+    Vehículo: vehicleName(f.vehicleId),
+    Chofer: f.driverName || '',
+    Motivo: f.reason || '',
+    Lugar: f.place || '',
+    'Monto $': f.amount ?? null,
+    'Vence el pago': xDay(f.dueDate),
+    Estado: FINE_STATUS[f.status] || f.status,
+    Notas: f.note || '',
+    'Cargada por': f.createdBy?.name || '',
+  }));
+}
+
+function serviceRows({ from, to }) {
+  const rows = [];
+  for (const t of state.tasks) {
+    for (const h of t.history || []) {
+      if (!h.date || h.date < from || h.date > to) continue;
+      rows.push({
+        Fecha: xDay(h.date), Vehículo: vehicleName(t.vehicleId), Tarea: t.name, Km: h.km ?? null, Taller: h.shop || '', 'Costo $': h.cost ?? null, Notas: h.note || '', 'Cargado por': h.by?.name || '',
+      });
+    }
+  }
+  return rows.sort((a, b) => a.Fecha - b.Fecha);
 }
 
 async function exportXlsx(all = false) {
@@ -192,6 +233,12 @@ async function exportXlsx(all = false) {
   add('Usos', usoRows(d.usos), { Vehículo: 'Sin usos en el período' });
   add('Cargas de nafta', cargaRows(d.cargas.filter((e) => e.source === 'carga' || e.liters)), { Vehículo: 'Sin cargas en el período' });
   add('Gastos', expenseRows(d.expenses), { Fecha: 'Sin gastos en el período' });
+  const sum = summaryRows(d);
+  add('Resumen por chofer', sum.drivers, { Chofer: 'Sin usos en el período' });
+  add('Resumen por vehículo', sum.vehicles, { Vehículo: 'Sin datos en el período' });
+  add('Resumen por obra', sum.obras, { 'Obra / destino': 'Sin usos en el período' });
+  add('Multas', fineRows(range), { Fecha: 'Sin multas en el período' });
+  add('Historial de service', serviceRows(range), { Fecha: 'Sin service en el período' });
   const name = all ? `flota-slavon-todo-${today()}.xlsx` : `flota-slavon-${range.from}-a-${range.to}.xlsx`;
   XLSX.writeFile(wb, name, { compression: true });
 }
