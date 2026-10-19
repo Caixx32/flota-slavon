@@ -1,0 +1,282 @@
+rules_version = '2';
+
+// Reglas de Firestore para Flota Slavon.
+// Para usarlas: consola de Firebase → Firestore Database → pestaña «Reglas» → borrar lo que haya,
+// pegar todo este archivo → «Publicar».
+//
+// Roles (se guardan en users/{mail}):
+//   admin      → todo, incluida la gestión de usuarios.
+//   encargado  → todo menos usuarios y roles.
+//   chofer     → sólo iniciar uso, terminar su uso y cargar nafta. No lee historial, gastos ni nada más.
+// El mail del dueño siempre es admin, aunque no tenga su documento en users (sirve para el primer ingreso).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------- Quién es el que pide ---------- */
+
+    function signedIn() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email_verified == true;
+    }
+
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function isOwner() {
+      return signedIn() && myEmail() == 'juanmarcospaterno@gmail.com';
+    }
+
+    function userPath() {
+      return /databases/$(database)/documents/users/$(myEmail());
+    }
+
+    function profile() {
+      return get(userPath()).data;
+    }
+
+    function hasRole(roles) {
+      return signedIn() && exists(userPath()) && profile().active == true && profile().role in roles;
+    }
+
+    function isAdmin() {
+      return isOwner() || hasRole(['admin']);
+    }
+
+    function isStaff() {
+      return isOwner() || hasRole(['admin', 'encargado']);
+    }
+
+    function isDriver() {
+      return hasRole(['chofer']);
+    }
+
+    function isMember() {
+      return isStaff() || isDriver();
+    }
+
+    /* ---------- Ayudas ---------- */
+
+    function changed() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function nowMs() {
+      return request.time.toMillis();
+    }
+
+    // Hora puesta por el celular. Se aceptan hasta 3 días hacia atrás porque la app guarda sin señal
+    // y sincroniza después; nunca más de 10 minutos en el futuro.
+    function plausibleTime(ms) {
+      return ms is int && ms <= nowMs() + 600000 && ms >= nowMs() - 259200000;
+    }
+
+    function stampedByMe(field) {
+      return request.resource.data[field].email == myEmail();
+    }
+
+    function validFile(f) {
+      return f == null || (f is map && f.id is string && f.chunks is int && f.chunks >= 1 && f.chunks <= 4);
+    }
+
+    function usoPath(id) {
+      return /databases/$(database)/documents/usos/$(id);
+    }
+
+    /* ---------- Usuarios ---------- */
+
+    match /users/{email} {
+      // Cada uno puede leer su propio documento (así la app sabe qué rol tiene o si no tiene acceso).
+      allow read: if (signedIn() && email == myEmail()) || isStaff();
+
+      // Sólo admin da de alta, cambia roles o desactiva.
+      allow create, update, delete: if isAdmin()
+        && (request.method == 'delete' || (
+             request.resource.data.role in ['admin', 'encargado', 'chofer']
+             && request.resource.data.active is bool
+             && email == email.lower()));
+
+      // El dueño puede crear su propio documento la primera vez.
+      allow create: if isOwner() && email == myEmail()
+        && request.resource.data.role == 'admin' && request.resource.data.active == true;
+
+      // Cualquier usuario activo puede actualizar su nombre y foto de Google, nada más.
+      allow update: if signedIn() && email == myEmail() && resource.data.active == true
+        && changed().hasOnly(['name', 'photoURL', 'lastLogin']);
+    }
+
+    /* ---------- Configuración y obras ---------- */
+
+    match /config/{doc} {
+      allow read, write: if isStaff();
+    }
+
+    match /obras/{id} {
+      allow read: if isMember();
+      allow write: if isStaff();
+    }
+
+    /* ---------- Vehículos ---------- */
+
+    match /vehicles/{id} {
+      allow read: if isMember();
+      allow create, delete: if isStaff();
+      allow update: if isStaff() || driverStartsUso() || driverEndsUso();
+
+      // Al iniciar un uso: el vehículo pasa a «en uso» con el uso nuevo del chofer (creado en el mismo lote).
+      function driverStartsUso() {
+        let nu = request.resource.data;
+        let uso = getAfter(usoPath(nu.openUsoId)).data;
+        return isDriver()
+          && resource.data.active == true
+          && resource.data.status != 'taller'
+          && changed().hasOnly(['status', 'openUsoId', 'driverEmail', 'driverName', 'usoStartAt'])
+          && nu.status == 'uso'
+          && nu.driverEmail == myEmail()
+          && nu.openUsoId is string
+          && exists(usoPath(nu.openUsoId)) == false
+          && uso.driverEmail == myEmail()
+          && uso.vehicleId == id
+          && uso.status == 'abierto';
+      }
+
+      // Al terminar el uso: el km del vehículo queda en el km de bajada de ESE uso, y nada más cambia.
+      function driverEndsUso() {
+        let nu = request.resource.data;
+        let uso = getAfter(usoPath(resource.data.openUsoId)).data;
+        return isDriver()
+          && resource.data.openUsoId is string
+          && changed().hasOnly(['status', 'openUsoId', 'driverEmail', 'driverName', 'usoStartAt', 'km', 'kmAt'])
+          && nu.status == 'disponible'
+          && nu.openUsoId == null
+          && uso.driverEmail == myEmail()
+          && uso.vehicleId == id
+          && uso.status == 'cerrado'
+          && nu.km == uso.kmEnd;
+      }
+    }
+
+    /* ---------- Usos ---------- */
+
+    match /usos/{id} {
+      // El chofer sólo puede ver su propio uso abierto (para poder terminarlo). Nunca el historial.
+      allow read: if isStaff()
+        || (isDriver() && resource.data.driverEmail == myEmail()
+            && resource.data.status in ['abierto', 'sin_cerrar']);
+
+      allow create: if isStaff() || driverCreatesUso();
+      allow update: if isStaff() || driverClosesUso() || driverFlagsUnclosed();
+      allow delete: if isStaff();
+
+      function driverCreatesUso() {
+        let d = request.resource.data;
+        return isDriver()
+          && d.keys().hasOnly(['id', 'vehicleId', 'vehicleName', 'driverEmail', 'driverName', 'startAt',
+                               'kmStart', 'kmPrev', 'photoStart', 'obraId', 'obraName', 'status',
+                               'createdBy', 'createdAt'])
+          && d.id == id
+          && d.driverEmail == myEmail()
+          && stampedByMe('createdBy')
+          && d.createdAt == request.time
+          && d.status == 'abierto'
+          && plausibleTime(d.startAt)
+          && d.kmStart is number && d.kmStart >= 0
+          && d.vehicleId is string
+          && validFile(d.photoStart) && d.photoStart != null
+          && d.obraName is string && d.obraName.size() > 0;
+      }
+
+      // Terminar el propio uso (abierto, o marcado «sin cerrar» porque otro ya inició uno).
+      // Una vez cerrado, el chofer ya no lo puede tocar.
+      function driverClosesUso() {
+        let d = request.resource.data;
+        return isDriver()
+          && resource.data.driverEmail == myEmail()
+          && resource.data.status in ['abierto', 'sin_cerrar']
+          && changed().hasOnly(['status', 'endAt', 'kmEnd', 'photoEnd', 'notes', 'closedBy', 'closedAt', 'wasUnclosed'])
+          && d.status == 'cerrado'
+          && d.kmEnd is number && d.kmEnd > resource.data.kmStart
+          && plausibleTime(d.endAt) && d.endAt >= resource.data.startAt
+          && validFile(d.photoEnd) && d.photoEnd != null
+          && (!('notes' in d) || (d.notes is string && d.notes.size() <= 2000))
+          && stampedByMe('closedBy')
+          && d.closedAt == request.time;
+      }
+
+      // Si alguien inicia un uso en un vehículo con otro uso abierto, ese uso queda «sin cerrar» para revisión.
+      // Sólo vale en el mismo lote en que ese chofer toma el vehículo con un uso nuevo.
+      function driverFlagsUnclosed() {
+        let v = getAfter(/databases/$(database)/documents/vehicles/$(resource.data.vehicleId)).data;
+        return isDriver()
+          && resource.data.status == 'abierto'
+          && v.openUsoId != id
+          && v.driverEmail == myEmail()
+          && changed().hasOnly(['status', 'flaggedBy', 'flaggedAt'])
+          && request.resource.data.status == 'sin_cerrar'
+          && stampedByMe('flaggedBy')
+          && request.resource.data.flaggedAt == request.time;
+      }
+    }
+
+    /* ---------- Gastos (incluye las cargas de nafta) ---------- */
+
+    match /expenses/{id} {
+      allow read, update, delete: if isStaff();
+      allow create: if isStaff() || driverLoadsFuel();
+
+      function driverLoadsFuel() {
+        let d = request.resource.data;
+        return isDriver()
+          && d.keys().hasOnly(['id', 'vehicleId', 'vehicleName', 'cat', 'source', 'date', 'at', 'km',
+                               'liters', 'amount', 'station', 'photo', 'usdRate', 'rateApprox',
+                               'createdBy', 'createdAt'])
+          && d.id == id
+          && d.cat == 'combustible'
+          && d.source == 'carga'
+          && stampedByMe('createdBy')
+          && d.createdAt == request.time
+          && plausibleTime(d.at)
+          && d.km is number && d.km >= 0
+          && d.liters is number && d.liters > 0 && d.liters < 500
+          && d.amount is number && d.amount > 0
+          && validFile(d.photo) && d.photo != null;
+      }
+    }
+
+    /* ---------- Sólo admin y encargado ---------- */
+
+    match /tasks/{id} {
+      allow read, write: if isStaff();
+    }
+
+    match /docs/{id} {
+      allow read, write: if isStaff();
+    }
+
+    match /fines/{id} {
+      allow read, write: if isStaff();
+    }
+
+    /* ---------- Archivos (fotos y PDF partidos en pedazos) ---------- */
+
+    match /files/{chunkId} {
+      // Las fotos de los vehículos las ven todos (para elegir el vehículo); el resto sólo admin y encargado.
+      allow get: if isStaff() || (isMember() && resource.data.kind == 'vehicle');
+      allow list: if isStaff();
+      allow write: if isStaff();
+      // El chofer sube las fotos del tablero y del ticket, pero no puede leerlas ni pisarlas después.
+      allow create: if isDriver()
+        && request.resource.data.owner == myEmail()
+        && request.resource.data.kind in ['tablero', 'ticket']
+        && request.resource.data.data is string
+        && request.resource.data.data.size() <= 750000;
+    }
+
+    // Cualquier otra cosa queda cerrada.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

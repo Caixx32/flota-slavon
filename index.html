@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Flota Slavon</title>
+  <meta name="description" content="Usos, cargas de nafta, service, papeles, gastos y multas de la flota de Slavon High Sport Performance.">
+  <meta name="theme-color" content="#22282c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Flota Slavon">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <img class="topbar-logo" src="icons/logo-white.png" alt="Slavon" width="120" height="14">
+    <span class="topbar-sub">Flota</span>
+    <span class="spacer"></span>
+    <span id="offline-chip" class="chip offline" hidden>Sin señal</span>
+    <span id="pending-chip" class="chip pending" hidden>Sincronizando…</span>
+    <button id="me-btn" class="me-btn" type="button" hidden></button>
+  </header>
+
+  <div id="alert-banner" class="alert-banner" role="alert" hidden></div>
+
+  <main id="view"></main>
+
+  <nav id="tabs" class="tabs" aria-label="Secciones" hidden>
+    <button data-tab="home" class="active"><svg data-icon="home"></svg><span>Inicio</span></button>
+    <button data-tab="usos"><svg data-icon="history"></svg><span>Usos</span></button>
+    <button data-tab="vehicles"><svg data-icon="car"></svg><span>Vehículos</span></button>
+    <button data-tab="reports"><svg data-icon="chart"></svg><span>Reportes</span></button>
+    <button data-tab="more"><svg data-icon="menu"></svg><span>Más</span></button>
+  </nav>
+
+  <dialog id="modal">
+    <form id="modal-form" method="dialog" novalidate>
+      <div class="sheet-grip"></div>
+      <h2 id="modal-title"></h2>
+      <div id="modal-fields"></div>
+      <div id="modal-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" id="modal-delete" class="btn danger" hidden>Eliminar</button>
+        <span class="spacer"></span>
+        <button type="button" id="modal-cancel" class="btn ghost">Cancelar</button>
+        <button type="submit" id="modal-save" class="btn primary">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sheet" class="sheet">
+    <div class="sheet-grip"></div>
+    <div id="sheet-body"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <div id="auth-screen" class="auth-screen">
+    <div class="auth-card">
+      <img class="auth-logo" src="icons/logo.png" alt="Slavon High Sport Performance" width="260" height="30">
+      <div class="eyebrow">Flota de vehículos</div>
+      <h1 data-auth-title>Conectando…</h1>
+      <p class="sub" data-auth-text></p>
+      <div class="auth-spinner" aria-hidden="true"></div>
+      <button class="btn primary auth-btn" data-auth-login hidden><svg data-icon="google"></svg>Entrar con Google</button>
+      <button class="btn auth-btn" data-auth-other hidden>Entrar con otra cuenta</button>
+      <button class="btn auth-btn" data-auth-retry hidden>Reintentar</button>
+      <div class="auth-emu" hidden>
+        <p class="sub">Modo prueba (emulador): entrar como</p>
+        <input type="email" data-emu-email placeholder="mail@prueba.com">
+        <button class="btn" data-emu-login>Entrar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="cloud.js"></script>
+  <script src="store.js"></script>
+  <script src="charts.js"></script>
+  <script src="ui.js"></script>
+  <script src="flows.js"></script>
+  <script src="views.js"></script>
+  <script src="reports.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
